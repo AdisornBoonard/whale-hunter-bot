@@ -8,7 +8,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURATION & STYLING ---
-st.set_page_config(page_title="Whale Hunter V7.6 - True Reversal Core", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Whale Hunter V7.7 - Fix Close Button", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -34,14 +34,13 @@ exchange = ccxt.bingx({
 })
 exchange.set_sandbox_mode(False) 
 
-# ⚙️ ยึดค่าคอนฟิกตามหน้าเว็บบอทคลาวด์ของพี่ แต่ปรับสูตรคำนวณตามต้นแบบ
 SYMBOL = 'NCCOGOLD2USD/USDT:USDT'
 TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 EMA_LENGTH = 20
 USE_EMA = True
-EMA_REVERSE_DIST = 1.5  # ระยะกลับตัวจากเส้น EMA (%) ตามต้นแบบพี่
+EMA_REVERSE_DIST = 1.5  
 
 default_margin = 0.06   
 default_lev = 250       
@@ -83,21 +82,18 @@ def get_balance():
     except:
         return 0.0, 0.0
 
-# --- 3. CORE TRADING ENGINE (อัปเกรดตรรกะตามต้นแบบ 100%) ---
+# --- 3. CORE TRADING ENGINE ---
 def get_market_and_signal():
     try:
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=150)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
         
-        # คำนวณค่าเทคนิคอล
         df['mfi'] = calculate_mfi(df, length=MFI_LENGTH)
         df['ema'] = df['close'].ewm(span=EMA_LENGTH, adjust=False).mean()
         df['v_ma'] = df['volume'].rolling(window=20).mean()
         
-        # ตรวจสอบแท่งเทียนที่พึ่งปิดสมบูรณ์ (index ล่าสุด - 2) เสมือน [1] ใน Pine Script
         idx = len(df) - 2
-        
         c_close = df.iloc[idx]['close']
         c_high  = df.iloc[idx]['high']
         c_low   = df.iloc[idx]['low']
@@ -106,12 +102,10 @@ def get_market_and_signal():
         c_vma   = df.iloc[idx]['v_ma']
         c_ema   = df.iloc[idx]['ema']
         
-        # ค่าของแท่งก่อนหน้าเพื่อเช็กความชันแท่งต่อแท่งตามต้นแบบ
         p_high  = df.iloc[idx-1]['high']
         p_low   = df.iloc[idx-1]['low']
         p_mfi   = df.iloc[idx-1]['mfi']
         
-        # 🎯 ตรรกะตรวจจับสัญญาณแบบ Bar-by-Bar ตามต้นแบบเป๊ะๆ 
         bull_div = (c_low < p_low) and (c_mfi > p_mfi) and (c_mfi < 40)
         bear_div = (c_high > p_high) and (c_mfi < p_mfi) and (c_mfi > 60)
         is_w = c_vol > (c_vma * VOL_MULTIPLIER)
@@ -119,7 +113,6 @@ def get_market_and_signal():
         long_base  = bull_div and is_w
         short_base = bear_div and is_w
         
-        # 🎯 ตรรกะวัดระยะห่างตัวคูณเทรนด์ EMA Reversal Distance
         ema_bull = c_close > c_ema
         ema_bear = c_close < c_ema
         
@@ -132,7 +125,6 @@ def get_market_and_signal():
             l_sig = long_base
             s_sig = short_base
         else:
-            # LONG SIGNAL LOGIC
             if long_base:
                 if far_from_ema:
                     if ema_bull: s_sig = True
@@ -140,8 +132,6 @@ def get_market_and_signal():
                 else:
                     if ema_bull: l_sig = True
                     else: s_sig = True
-                    
-            # SHORT SIGNAL LOGIC
             if short_base:
                 if far_from_ema:
                     if ema_bull: s_sig = True
@@ -183,6 +173,7 @@ def rebuild_virtual_orders(live_price, base_margin, leverage):
                     for i in range(num_tickets):
                         virtual_orders.append({
                             "Ticket": f"ไม้ที่ #{i+1}",
+                            "Index": i+1, # ใช้ทำ Key แบบคงที่
                             "Side": side,
                             "Amount": round(total_amt / num_tickets, 4),
                             "Entry": entry,
@@ -223,19 +214,28 @@ def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, i
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': pos_side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = (f"{emoji_side} *Whale Hunter V7.6 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
+        tg_msg = (f"{emoji_side} *Whale Hunter V7.7 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
         send_telegram_message(tg_msg)
         return f"เปิด {pos_side} สำเร็จ"
     except Exception as e:
         return f"❌ สั่งซื้อล้มเหลว: {e}"
 
+# 🛠️ ปรับฟังก์ชันปิดเฉพาะไม้ให้ดึงค่าขนาดสัญญา (Amount) เป็นค่าบวกและแม่นยำ 100%
 def close_specific_virtual_order(side, amount):
     try:
         close_side = 'sell' if side == 'LONG' else 'buy'
-        exchange.create_order(symbol=SYMBOL, type='market', side=close_side, amount=amount, params={'positionSide': side})
-        return f"✅ ปิดไม้จำลองสำเร็จ"
+        target_amount = abs(float(amount)) # บังคับเป็นค่าบวกเสมอ
+        exchange.create_order(
+            symbol=SYMBOL, 
+            type='market', 
+            side=close_side, 
+            amount=target_amount, 
+            params={'positionSide': side}
+        )
+        return True
     except Exception as e:
-        return f"❌ สั่งปิดไม้ล้มเหลว: {e}"
+        st.error(f"API Error: {e}")
+        return False
 
 def close_all_positions():
     try:
@@ -260,7 +260,7 @@ bot_status_color = "#00e676" if st.session_state.bot_active else "#ff1744"
 
 st.markdown(f"""
 <div style="background-color: #12161f; border: 1px solid #1e2533; padding: 10px 20px; border-radius: 6px; margin-bottom: 20px;">
-    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.6 - TRUE REVERSAL MODEL</span>
+    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.7 - FIXED VIRTUAL CLOSE</span>
     <span style="float: right; color: {bot_status_color}; font-weight: bold; padding-top: 5px;">{bot_status_indicator}</span>
 </div>
 """, unsafe_allow_html=True)
@@ -312,7 +312,6 @@ with col_left:
             send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดหน้าพอร์ตจริงทั้งหมดเรียบร้อย")
             st.rerun()
 
-# --- ระบบออโต้สแกนยิงคำสั่งตามตรรกะใหม่ ---
 if st.session_state.bot_active and signal in ["LONG", "SHORT"]:
     if 'last_order_time' not in st.session_state:
         st.session_state.last_order_time = 0
@@ -342,6 +341,7 @@ with col_center:
             entry = order['Entry']
             amt = order['Amount']
             side = order['Side']
+            idx_num = order['Index']
             
             tp_factor = st.session_state.tp_percent / 100
             sl_factor = st.session_state.sl_percent / 100
@@ -367,10 +367,13 @@ with col_center:
                 c3.markdown(f"Entry: `${entry:.2f}`<br><span style='color:#00e676;'>🎯 TP: ${target_tp:.2f}</span><br><span style='color:#ff1744;'>🛑 SL: ${target_sl:.2f}</span>", unsafe_allow_html=True)
                 c4.markdown(f"<span style='color:{pnl_color}; font-weight:bold;'>P/L: ${pnl_usd:.4f}<br>({pnl_pct:.2f}%)</span>", unsafe_allow_html=True)
                 
-                if c5.button("❌ ปิดไม้นี้", key=f"close_{side}_{amt}_{time.time()}", use_container_width=True):
-                    res = close_specific_virtual_order(side, amt)
-                    send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดไม้ {side} ขนาด {amt} เรียบร้อย")
-                    st.rerun()
+                # 🛠️ แก้ไขคีย์ของปุ่มล็อกให้คงที่ ไม่เปลี่ยนตามเวลา เพื่อเสถียรภาพในการคลิก
+                if c5.button("❌ ปิดไม้นี้", key=f"btn_close_{side}_{idx_num}", use_container_width=True):
+                    success = close_specific_virtual_order(side, amt)
+                    if success:
+                        send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดไม้ {side} ขนาด {amt} ผ่านหน้าจอสำเร็จ")
+                        time.sleep(0.5)
+                        st.rerun()
     else:
         st.info("ℹ️ พอร์ตว่างเปล่า (ไม่มีออเดอร์ค้างในกระดานเทรด)")
 
