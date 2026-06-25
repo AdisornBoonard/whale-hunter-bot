@@ -9,7 +9,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURATION & STYLING ---
-st.set_page_config(page_title="Whale Hunter V8.0 - CCI & EMA Reversal", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Whale Hunter V8.1 - Matrix Analytics", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -40,17 +40,20 @@ SYMBOL = 'NCCOGOLD2USD/USDT:USDT'
 TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
-EMA_LENGTH = 200 # ปรับตาม Pine Script V8.0
+EMA_LENGTH = 200
 
-# --- ⚙️ PERSISTENT TIME TRACKING ---
+# --- ⚙️ PERSISTENT ENGINE STATES (ระบบจำจดประวัติจุดเข้าซื้อและการรันระบบ) ---
 if 'bot_start_time' not in st.session_state:
     st.session_state.bot_start_time = time.time()
 if 'tp_percent' not in st.session_state:
-    st.session_state.tp_percent = 1.50 # ปรับเริ่มต้นตาม V8.0
+    st.session_state.tp_percent = 0.50
 if 'sl_percent' not in st.session_state:
-    st.session_state.sl_percent = 1.00 # ปรับเริ่มต้นตาม V8.0
+    st.session_state.sl_percent = 0.30
 if 'bot_active' not in st.session_state:
     st.session_state.bot_active = True
+# 🛠️ ใช้สำหรับเก็บตำแหน่งแท่งเทียนที่บอทยิงจริงไปปักหมุดบนกราฟคลาวด์ย้อนหลัง
+if 'executed_signals_history' not in st.session_state:
+    st.session_state.executed_signals_history = [] 
 
 # --- 2. HELPERS FUNCTIONS ---
 def calculate_mfi(df, length=14):
@@ -68,7 +71,7 @@ def calculate_mfi(df, length=14):
 def calculate_cci(df, length=14):
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     sma = typical_price.rolling(window=length).mean()
-    mad = typical_price.rolling(window=length).apply(lambda x: pd.Series(x).mad())
+    mad = typical_price.rolling(window=length).apply(lambda x: pd.Series(x).mad() if hasattr(pd.Series(x), 'mad') else np.abs(x - x.mean()).mean())
     cci = (typical_price - sma) / (0.015 * mad)
     return cci
 
@@ -88,7 +91,7 @@ def get_balance():
     except:
         return 0.0, 0.0
 
-# --- 3. CORE TRADING ENGINE (อัปเกรดตรรกะ V8.0 CCI + EMA) ---
+# --- 3. CORE TRADING ENGINE (CCI + EMA Reversal) ---
 def get_market_and_signal(use_ema, ema_reverse_dist, use_cci, cci_length, cci_ob, cci_os):
     try:
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=150)
@@ -129,7 +132,6 @@ def get_market_and_signal(use_ema, ema_reverse_dist, use_cci, cci_length, cci_ob
         
         l_sig, s_sig = False, False
         
-        # 1. ประมวลผลขั้นที่หนึ่ง: EMA Filter
         if not use_ema:
             l_sig = long_base
             s_sig = short_base
@@ -149,12 +151,11 @@ def get_market_and_signal(use_ema, ema_reverse_dist, use_cci, cci_length, cci_ob
                     if ema_bear: s_sig = True
                     else: l_sig = True
                     
-        # 2. ประมวลผลขั้นที่สอง: CCI Reversal 
         if use_cci and (l_sig or s_sig):
-            if cci_val > cci_ob:
+            if c_cci > cci_ob:
                 s_sig = True
                 l_sig = False
-            elif cci_val < cci_os:
+            elif c_cci < cci_os:
                 l_sig = True
                 s_sig = False
                 
@@ -170,11 +171,13 @@ def get_market_and_signal(use_ema, ema_reverse_dist, use_cci, cci_length, cci_ob
     except Exception as ex:
         return "ERROR", 0, None, pd.DataFrame(), str(ex), 0.0
 
+# 🛠️ ปรับระบบคัดกรองข้อมูลไม้จริงเป็นแบบแตกตามราคาเข้าของกระดาน (Advanced Virtualizer)
 def rebuild_virtual_orders(live_price, active_margin, leverage):
     virtual_orders = []
     l_count, s_count = 0, 0
     try:
         positions = exchange.fetch_positions()
+        # คำนวณหาขนาดมาตรฐานของสัญญาต่อ 1 ตั๋ว (ตาม Margin ณ วันนั้น ๆ)
         one_ticket_amt = round((active_margin * leverage) / live_price, 4) if live_price > 0 else 0.0001
         
         for pos in positions:
@@ -183,9 +186,12 @@ def rebuild_virtual_orders(live_price, active_margin, leverage):
                 pos_symbol = pos.get('symbol', '').upper()
                 if 'GOLD' in pos_symbol or 'NCCO' in pos_symbol:
                     side = pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT')
-                    entry = pos.get('entryPrice', live_price)
                     
+                    # 🎯 ดึงราคาเข้าซื้อจริงเดี่ยว ๆ จากกระดานมาใช้งาน ไม่ใช่ค่าเฉลี่ยสะสมรวมพอร์ต
+                    real_entry_price = float(pos.get('entryPrice', live_price))
                     total_amt = abs(size)
+                    
+                    # แตกจำนวนไม้ตามขนาด Position จริงหารด้วยปริมาณสัญญารายไม้มาตรฐาน
                     num_tickets = max(1, round(total_amt / one_ticket_amt))
                     
                     if side == 'LONG': l_count = num_tickets
@@ -197,7 +203,7 @@ def rebuild_virtual_orders(live_price, active_margin, leverage):
                             "Index": i+1,
                             "Side": side,
                             "Amount": round(total_amt / num_tickets, 4),
-                            "Entry": entry,
+                            "Entry": real_entry_price, # ใช้ราคาเข้าจริงจำลองรายตั๋ว
                             "Margin": round(active_margin, 2),
                             "Leverage": leverage
                         })
@@ -229,17 +235,24 @@ def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, i
         main_params = {'positionSide': pos_side}
         exchange.create_order(symbol=SYMBOL, type='market', side=order_side, amount=contract_amount, params=main_params)
         
+        # 🛠️ บันทึกประวัติจุดเปิดออเดอร์ลงระบบคลาวด์เพื่อดึงไปสลักลงบนกราฟ Plotly
+        st.session_state.executed_signals_history.append({
+            "timestamp": time.time() * 1000,
+            "side": pos_side,
+            "price": entry_price
+        })
+
         try:
             tp_sl_side = 'sell' if side == 'LONG' else 'buy'
             exchange.create_order(symbol=SYMBOL, type='TAKE_PROFIT_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': pos_side, 'stopPrice': tp_price, 'workingType': 'MARK_PRICE'})
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': pos_side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = (f"{emoji_side} *Whale Hunter V8.0 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n• *ใช้ Margin จริง:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
+        tg_msg = (f"{emoji_side} *Whale Hunter V8.1 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้าจริง:* ${entry_price}\n• *ใช้ Margin จริง:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
         send_telegram_message(tg_msg)
         return f"เปิด {pos_side} สำเร็จ"
     except Exception as e:
-        return f"❌ สั่งซื้อล้มเหลว: {e}"
+        return f"❌ สั่งซื้อล้มหลาย: {e}"
 
 def close_specific_virtual_order(side, amount):
     try:
@@ -268,13 +281,13 @@ def close_all_positions():
     except Exception as e:
         return f"❌ ข้อผิดพลาด: {e}"
 
-# --- 4. STREAMLIT FRONT-END ---
+# --- 4. STREAMLIT FRONT-END PANEL ---
 bot_status_indicator = "● LIVE AUTOTRADING ACTIVE" if st.session_state.bot_active else "○ AUTOTRADING DISABLED"
 bot_status_color = "#00e676" if st.session_state.bot_active else "#ff1744"
 
 st.markdown(f"""
 <div style="background-color: #12161f; border: 1px solid #1e2533; padding: 10px 20px; border-radius: 6px; margin-bottom: 20px;">
-    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V8.0 - CCI & EMA REVERSAL ENGINE</span>
+    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V8.1 - ADVANCED POSITION MATRIX</span>
     <span style="float: right; color: {bot_status_color}; font-weight: bold; padding-top: 5px;">{bot_status_indicator}</span>
 </div>
 """, unsafe_allow_html=True)
@@ -296,14 +309,13 @@ with col_left:
         st.session_state.tp_percent = st.slider("TP (%)", 0.1, 5.0, st.session_state.tp_percent)
         st.session_state.sl_percent = st.slider("SL (%)", 0.1, 5.0, st.session_state.sl_percent)
         
-        # --- 🛠️ >>> NEW: CCI SETTINGS ON SIDEBAR PANEL <<< ---
-        st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>CCI REVERSAL FILTER</h4>", unsafe_allow_html=True)
+        # --- CCI Reversal Parameters ---
         u_cci = st.checkbox("เปิดใช้งาน CCI Reversal", value=True)
-        c_len = st.number_input("CCI Length", value=14, min_value=1)
-        c_ob = st.number_input("CCI Overbought (Sell)", value=100.0, step=10.0)
-        c_os = st.number_input("CCI Oversold (Long)", value=-100.0, step=10.0)
+        c_len = st.number_input("CCI Length", value=100, min_value=1)
+        c_ob = st.number_input("CCI Overbought (Sell)", value=40.0, step=10.0)
+        c_os = st.number_input("CCI Oversold (Long)", value=-150.0, step=10.0)
         
-        # --- EMA Toggle Option ---
+        # --- EMA Filter Option ---
         u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
         e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
         
@@ -323,7 +335,8 @@ with col_left:
             if st.button("🟢 เปิดรันบอท", use_container_width=True):
                 st.session_state.bot_active = True
                 st.session_state.bot_start_time = time.time()
-                send_telegram_message(f"🟢 *Whale Hunter V8.0:* เริ่มรันระบบพร้อมตัวกรอง CCI")
+                st.session_state.executed_signals_history = [] # เคลียร์ค่าประวัติตามรอบบอทใหม่
+                send_telegram_message(f"🟢 *Whale Hunter V8.1:* เริ่มรันระบบแยกคำนวณไม้แบบอิสระ")
                 st.rerun()
         with c_status_2:
             if st.button("🛑 ปิดระบบบอท", use_container_width=True):
@@ -346,10 +359,8 @@ with col_left:
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
         if st.button("🛑 CLOSE ALL POSITIONS (เคลียร์พอร์ต)", use_container_width=True, type="secondary"):
             res = close_all_positions()
-            send_telegram_message(f"🚨 *Whale Hunter:* สั่งเคลียร์พอร์ตผ่านหน้าจอบอท")
             st.rerun()
 
-# เรียกประมวลผลตรรกะ V8.0
 signal, live_price, bar_time, df_market, log_debug, current_cci_val = get_market_and_signal(u_ema, e_dist, u_cci, c_len, c_ob, c_os)
 virtual_orders_list, active_l, active_s = rebuild_virtual_orders(live_price, current_mgn_active, lev)
 
@@ -370,17 +381,35 @@ if st.session_state.bot_active and signal in ["LONG", "SHORT"]:
             st.rerun()
 
 with col_center:
-    st.markdown(f"<h3>{SYMBOL} Real-Time Chart</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3>{SYMBOL} Real-Time Chart (พร้อมจุดเปิดออเดอร์)</h3>", unsafe_allow_html=True)
     if not df_market.empty:
         fig = px.Figure()
+        # วาดแท่งเทียน Candlestick พื้นฐาน
         fig.add_trace(px.Candlestick(x=df_market['datetime'], open=df_market['open'], high=df_market['high'], low=df_market['low'], close=df_market['close'], name="ราคา"))
-        fig.update_layout(template="plotly_dark", paper_bgcolor='#12161f', plot_bgcolor='#12161f', margin=dict(l=5, r=5, t=5, b=5), height=200, xaxis_rangeslider_visible=False)
+        
+        # 🎯 มาร์กจุดเปิดออเดอร์ในอดีตลงบนกราฟคลาวด์แบบเดียวกับบน TradingView
+        if st.session_state.executed_signals_history:
+            hist_df = pd.DataFrame(st.session_state.executed_signals_history)
+            hist_df['datetime'] = pd.to_datetime(hist_df['timestamp'], unit='ms')
+            
+            long_marks = hist_df[hist_df['side'] == 'LONG']
+            short_marks = hist_df[hist_df['side'] == 'SHORT']
+            
+            if not long_marks.empty:
+                fig.add_trace(px.scatter(long_marks, x='datetime', y='price', text_font_color='white').data[0])
+                fig.data[-1].update(mode='markers+text', marker=dict(symbol='triangle-up', size=14, color='#00e676'), name='LONG ENTRY', text=['▲ LONG']*len(long_marks), textposition='bottom center')
+            if not short_marks.empty:
+                fig.add_trace(px.scatter(short_marks, x='datetime', y='price').data[0])
+                fig.data[-1].update(mode='markers+text', marker=dict(symbol='triangle-down', size=14, color='#ff1744'), name='SHORT ENTRY', text=['▼ SHORT']*len(short_marks), textposition='top center')
+
+        fig.update_layout(template="plotly_dark", paper_bgcolor='#12161f', plot_bgcolor='#12161f', margin=dict(l=5, r=5, t=5, b=5), height=240, xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("<h3>Virtual Positions (ระบบแยกไม้จำลอง)</h3>", unsafe_allow_html=True)
+    # 🛠️ แสดงโพสิชั่นแยกไม้ คำนวณ TP / SL และ PNL รายตั๋วขาดจากกันเด็ดขาดตามราคาจริง
+    st.markdown("<h3>Virtual Positions (ตารางแยกคำนวณรายไม้แบบอิสระ)</h3>", unsafe_allow_html=True)
     if virtual_orders_list:
         for order in virtual_orders_list:
-            entry = order['Entry']
+            entry = order['Entry'] # 🎯 ดึงราคาเข้าจริงเฉพาะของไม้นั้น ๆ มาประมวลผล
             amt = order['Amount']
             side = order['Side']
             idx_num = order['Index']
@@ -388,6 +417,7 @@ with col_center:
             tp_factor = st.session_state.tp_percent / 100
             sl_factor = st.session_state.sl_percent / 100
             
+            # คำนวณเป้าหมายราคาตามเงื่อนไขของตั๋วใบนั้น ๆ
             if side == "LONG":
                 pnl_usd = (live_price - entry) * amt
                 pnl_pct = ((live_price - entry) / entry) * 100 * order['Leverage']
@@ -409,7 +439,7 @@ with col_center:
                 
                 c3.html(f"""
                     <div style='font-family: monospace; font-size: 13px; color: white; line-height: 1.4;'>
-                        Entry: <span style='color: #b0bec5;'>${entry:.2f}</span><br>
+                        Real Entry: <span style='color: #fff176; font-weight:bold;'>${entry:.2f}</span><br>
                         <span style='color: #00e676; font-weight: bold;'>🎯 TP: ${target_tp:.2f}</span><br>
                         <span style='color: #ff1744; font-weight: bold;'>🛑 SL: ${target_sl:.2f}</span>
                     </div>
@@ -420,7 +450,6 @@ with col_center:
                 if c5.button("❌ ปิดไม้นี้", key=f"btn_close_{side}_{idx_num}", use_container_width=True):
                     success = close_specific_virtual_order(side, amt)
                     if success:
-                        send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดไม้ {side} ผ่านหน้าจอสำเร็จ")
                         time.sleep(0.5)
                         st.rerun()
     else:
@@ -435,8 +464,6 @@ with col_right:
         m3, m4 = st.columns(2)
         m3.metric("สรุปไม้จริง (L/S)", f"{active_l} / {active_s}")
         m4.metric("Live Price", f"${live_price}")
-        
-        # 🟢 โชว์ค่า CCI สด ๆ บนหน้าแดชบอร์ดขวาด้วยครับ
         st.metric("Live CCI Value", f"{current_cci_val:.2f}")
 
     st.markdown("<h3>Signal Log (บันทึกสแกนเรียลไทม์)</h3>", unsafe_allow_html=True)
