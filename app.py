@@ -321,7 +321,7 @@ with col_left:
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>EMA FILTER CONFIG</h4>", unsafe_allow_html=True)
         u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
-        e_len = st.number_input("EMA Length", value=200, step=10)
+        e_len = st.number_input("EMA Length", value=20, step=10)
         e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>CCI REVERSAL FILTER</h4>", unsafe_allow_html=True)
