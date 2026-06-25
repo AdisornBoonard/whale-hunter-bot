@@ -37,9 +37,9 @@ exchange.set_sandbox_mode(False)
 SYMBOL = 'NCCOGOLD2USD/USDT:USDT'
 TIMEFRAME = '1m'
 MFI_LENGTH = 14
-LOOKBACK = 100
+LOOKBACK = 10
 VOL_MULTIPLIER = 0.7
-EMA_LENGTH = 10
+EMA_LENGTH = 20
 USE_EMA = True
 
 default_margin = 0.06   
