@@ -364,7 +364,13 @@ with col_center:
                 c1.markdown(f"**{order['Ticket']}**", unsafe_allow_html=True)
                 badge_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 c2.markdown(f"{badge_side}\n`Amt: {amt}`", unsafe_allow_html=True)
-                c3.markdown(f"Entry: `${entry:.2f}`<br><span style='color:#00e676;'>🎯 TP: ${target_tp:.2f}</span><br><span style='color:#ff1744;'>🛑 SL: ${target_sl:.2f}</span>", unsafe_allow_html=True)
+                c3.html(f"""
+                        <div style='font-family: monospace; font-size: 14px;'>
+                        Entry: <span style='color: #eceff1;'>${entry:.2f}</span><br>
+                            <span style='color: #00e676;'>🎯 TP: ${target_tp:.2f}</span><br>
+                            <span style='color: #ff1744;'>🛑 SL: ${target_sl:.2f}</span>
+                        </div>
+                        """)
                 c4.markdown(f"<span style='color:{pnl_color}; font-weight:bold;'>P/L: ${pnl_usd:.4f}<br>({pnl_pct:.2f}%)</span>", unsafe_allow_html=True)
                 
                 # 🛠️ แก้ไขคีย์ของปุ่มล็อกให้คงที่ ไม่เปลี่ยนตามเวลา เพื่อเสถียรภาพในการคลิก
