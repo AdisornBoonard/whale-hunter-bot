@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import ccxt
 import requests
 import pandas as pd
@@ -8,7 +9,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURATION & STYLING ---
-st.set_page_config(page_title="Whale Hunter V7.7 - Fix Close Button", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Whale Hunter V7.8 - Dynamic Margin Core", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -17,6 +18,7 @@ st.markdown("""
         .stTable { background-color: #12161f !important; border: 1px solid #1e2533 !important; border-radius: 6px; }
         h3 { color: #90a4ae !important; font-size: 14px !important; text-transform: uppercase; letter-spacing: 0.5px; }
         .stCaption { font-family: monospace; font-size: 12px; }
+        .margin-box { background-color: #0d47a1 !important; border: 1px solid #1565c0 !important; padding: 10px; border-radius: 4px; text-align: center; margin-bottom: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -42,10 +44,9 @@ EMA_LENGTH = 20
 USE_EMA = True
 EMA_REVERSE_DIST = 1.5  
 
-default_margin = 0.06   
-default_lev = 250       
-default_max_t = 5       
-
+# --- ⚙️ PERSISTENT TIME TRACKING (ระบบจำเวลาจำลองจำนวนวันเพิ่มทุนตามต้นแบบ) ---
+if 'bot_start_time' not in st.session_state:
+    st.session_state.bot_start_time = time.time()
 if 'tp_percent' not in st.session_state:
     st.session_state.tp_percent = 0.50
 if 'sl_percent' not in st.session_state:
@@ -149,12 +150,13 @@ def get_market_and_signal():
     except Exception as ex:
         return "ERROR", 0, None, pd.DataFrame(), str(ex)
 
-def rebuild_virtual_orders(live_price, base_margin, leverage):
+def rebuild_virtual_orders(live_price, active_margin, leverage):
     virtual_orders = []
     l_count, s_count = 0, 0
     try:
         positions = exchange.fetch_positions()
-        one_ticket_amt = round((base_margin * leverage) / live_price, 4) if live_price > 0 else 0.0001
+        # ใช้ active_margin (ค่าปัจจุบันที่บวกรายวันแล้ว) มาแตกสัดส่วนไม้จำลองให้ตรงความจริง
+        one_ticket_amt = round((active_margin * leverage) / live_price, 4) if live_price > 0 else 0.0001
         
         for pos in positions:
             size = float(pos.get('contracts', 0)) or float(pos.get('size', 0))
@@ -173,11 +175,11 @@ def rebuild_virtual_orders(live_price, base_margin, leverage):
                     for i in range(num_tickets):
                         virtual_orders.append({
                             "Ticket": f"ไม้ที่ #{i+1}",
-                            "Index": i+1, # ใช้ทำ Key แบบคงที่
+                            "Index": i+1,
                             "Side": side,
                             "Amount": round(total_amt / num_tickets, 4),
                             "Entry": entry,
-                            "Margin": round(base_margin, 2),
+                            "Margin": round(active_margin, 2),
                             "Leverage": leverage
                         })
     except Exception as e:
@@ -214,24 +216,17 @@ def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, i
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': pos_side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = (f"{emoji_side} *Whale Hunter V7.7 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
+        tg_msg = (f"{emoji_side} *Whale Hunter V7.8 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n• *ใช้ Margin จริง:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
         send_telegram_message(tg_msg)
         return f"เปิด {pos_side} สำเร็จ"
     except Exception as e:
         return f"❌ สั่งซื้อล้มเหลว: {e}"
 
-# 🛠️ ปรับฟังก์ชันปิดเฉพาะไม้ให้ดึงค่าขนาดสัญญา (Amount) เป็นค่าบวกและแม่นยำ 100%
 def close_specific_virtual_order(side, amount):
     try:
         close_side = 'sell' if side == 'LONG' else 'buy'
-        target_amount = abs(float(amount)) # บังคับเป็นค่าบวกเสมอ
-        exchange.create_order(
-            symbol=SYMBOL, 
-            type='market', 
-            side=close_side, 
-            amount=target_amount, 
-            params={'positionSide': side}
-        )
+        target_amount = abs(float(amount))
+        exchange.create_order(symbol=SYMBOL, type='market', side=close_side, amount=target_amount, params={'positionSide': side})
         return True
     except Exception as e:
         st.error(f"API Error: {e}")
@@ -260,14 +255,13 @@ bot_status_color = "#00e676" if st.session_state.bot_active else "#ff1744"
 
 st.markdown(f"""
 <div style="background-color: #12161f; border: 1px solid #1e2533; padding: 10px 20px; border-radius: 6px; margin-bottom: 20px;">
-    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.7 - FIXED VIRTUAL CLOSE</span>
+    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.8 - DYNAMIC DAILY MARGIN</span>
     <span style="float: right; color: {bot_status_color}; font-weight: bold; padding-top: 5px;">{bot_status_indicator}</span>
 </div>
 """, unsafe_allow_html=True)
 
 signal, live_price, bar_time, df_market, log_debug = get_market_and_signal()
 total_capital, available_capital = get_balance()
-virtual_orders_list, active_l, active_s = rebuild_virtual_orders(live_price, default_margin, default_lev)
 
 col_left, col_center, col_right = st.columns([1, 2, 1])
 
@@ -275,18 +269,36 @@ with col_left:
     st.markdown("<h3>Configuration</h3>", unsafe_allow_html=True)
     with st.container(border=True):
         st.metric("เงินทุนสุทธิในกระดาน", f"${total_capital}")
-        base_mgn = st.number_input("Margin ไม้แรก ($)", value=default_margin, format="%.2f")  
-        lev = st.number_input("Leverage (x)", value=default_lev, min_value=1, max_value=250)
-        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=default_max_t)
+        
+        # 🛠️ หน้าคอนฟิกเพิ่มช่องกรอกข้อมูล ทุนแรกเริ่ม และ เงินทุนเพิ่มรายวัน ตามที่พี่ต้องการ
+        base_mgn = st.number_input("Margin ไม้แรก ($)", value=0.06, format="%.4f", step=0.01)  
+        daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=0.03, format="%.4f", step=0.01)
+        
+        lev = st.number_input("Leverage (x)", value=250, min_value=1, max_value=250)
+        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=5)
         
         st.session_state.tp_percent = st.slider("TP (%)", 0.1, 5.0, st.session_state.tp_percent)
         st.session_state.sl_percent = st.slider("SL (%)", 0.1, 5.0, st.session_state.sl_percent)
+        
+        # 🎯 คำนวณหาค่าคุ้มครอง Margin จริง ณ ปัจจุบันตามสูตรต้นแบบเป๊ะๆ
+        days_passed = math.floor((time.time() - st.session_state.bot_start_time) / (24 * 60 * 60))
+        current_mgn_active = base_mgn + (days_passed * daily_add)
+        
+        # 🎯 โชว์สถานะตั๋วกล่องสีฟ้าเด่นๆ ว่าปัจจุบันใช้มาร์จิ้นเปิดออเดอร์เท่าไหร่
+        st.markdown(f"""
+            <div class='margin-box'>
+                <span style='font-size: 11px; color: #bbdefb;'>รันมาแล้ว {days_passed} วัน</span><br>
+                <span style='font-size: 13px; font-weight: bold; color: white;'>CURRENT ORDER MARGIN</span><br>
+                <span style='font-size: 22px; font-weight: bold; color: #64b5f6; font-family: monospace;'>${current_mgn_active:.4f}</span>
+            </div>
+        """, unsafe_allow_html=True)
         
         c_status_1, c_status_2 = st.columns(2)
         with c_status_1:
             if st.button("🟢 เปิดรันบอท", use_container_width=True):
                 st.session_state.bot_active = True
-                send_telegram_message("🟢 *Whale Hunter:* เปิดระบบรันบอทอัตโนมัติออนไลน์")
+                st.session_state.bot_start_time = time.time() # รีเซ็ตวันที่ 1 ใหม่ตอนเปิดรัน
+                send_telegram_message(f"🟢 *Whale Hunter:* เริ่มรันระบบด้วยฐานมาร์จิ้น ${base_mgn}")
                 st.rerun()
         with c_status_2:
             if st.button("🛑 ปิดระบบบอท", use_container_width=True):
@@ -299,11 +311,12 @@ with col_left:
         c_buy, c_sell = st.columns(2)
         with c_buy:
             if st.button("🚀 OPEN LONG", use_container_width=True):
-                res = fire_execution_order("LONG", live_price, base_mgn, lev, st.session_state.tp_percent, st.session_state.sl_percent, is_manual=True)
+                # ใช้ค่ามาร์จิ้นที่คำนวณสะสมส่งเข้าออเดอร์
+                res = fire_execution_order("LONG", live_price, current_mgn_active, lev, st.session_state.tp_percent, st.session_state.sl_percent, is_manual=True)
                 st.rerun()
         with c_sell:
             if st.button("💥 OPEN SHORT", use_container_width=True):
-                res = fire_execution_order("SHORT", live_price, base_mgn, lev, st.session_state.tp_percent, st.session_state.sl_percent, is_manual=True)
+                res = fire_execution_order("SHORT", live_price, current_mgn_active, lev, st.session_state.tp_percent, st.session_state.sl_percent, is_manual=True)
                 st.rerun()
         
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
@@ -312,6 +325,10 @@ with col_left:
             send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดหน้าพอร์ตจริงทั้งหมดเรียบร้อย")
             st.rerun()
 
+# วิ่งมาดึงตั๋วจำลองโดยอิงตามค่า Margin ที่แปรผัน ณ ปัจจุบัน
+virtual_orders_list, active_l, active_s = rebuild_virtual_orders(live_price, current_mgn_active, lev)
+
+# --- ระบบออโต้สแกนยิงคำสั่ง ---
 if st.session_state.bot_active and signal in ["LONG", "SHORT"]:
     if 'last_order_time' not in st.session_state:
         st.session_state.last_order_time = 0
@@ -319,11 +336,11 @@ if st.session_state.bot_active and signal in ["LONG", "SHORT"]:
     current_time_sec = time.time()
     if (current_time_sec - st.session_state.last_order_time) > 50:
         if signal == "LONG" and active_l < max_t:
-            res = fire_execution_order("LONG", live_price, base_mgn, lev, st.session_state.tp_percent, st.session_state.sl_percent)
+            res = fire_execution_order("LONG", live_price, current_mgn_active, lev, st.session_state.tp_percent, st.session_state.sl_percent)
             st.session_state.last_order_time = current_time_sec
             st.rerun()
         elif signal == "SHORT" and active_s < max_t:
-            res = fire_execution_order("SHORT", live_price, base_mgn, lev, st.session_state.tp_percent, st.session_state.sl_percent)
+            res = fire_execution_order("SHORT", live_price, current_mgn_active, lev, st.session_state.tp_percent, st.session_state.sl_percent)
             st.session_state.last_order_time = current_time_sec
             st.rerun()
 
@@ -364,16 +381,17 @@ with col_center:
                 c1.markdown(f"**{order['Ticket']}**", unsafe_allow_html=True)
                 badge_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 c2.markdown(f"{badge_side}\n`Amt: {amt}`", unsafe_allow_html=True)
+                
                 c3.html(f"""
-                        <div style='font-family: monospace; font-size: 14px;'>
-                        Entry: <span style='color: #eceff1;'>${entry:.2f}</span><br>
-                            <span style='color: #00e676;'>🎯 TP: ${target_tp:.2f}</span><br>
-                            <span style='color: #ff1744;'>🛑 SL: ${target_sl:.2f}</span>
-                        </div>
-                        """)
+                    <div style='font-family: monospace; font-size: 13px; color: white; line-height: 1.4;'>
+                        Entry: <span style='color: #b0bec5;'>${entry:.2f}</span><br>
+                        <span style='color: #00e676; font-weight: bold;'>🎯 TP: ${target_tp:.2f}</span><br>
+                        <span style='color: #ff1744; font-weight: bold;'>🛑 SL: ${target_sl:.2f}</span>
+                    </div>
+                """)
+                
                 c4.markdown(f"<span style='color:{pnl_color}; font-weight:bold;'>P/L: ${pnl_usd:.4f}<br>({pnl_pct:.2f}%)</span>", unsafe_allow_html=True)
                 
-                # 🛠️ แก้ไขคีย์ของปุ่มล็อกให้คงที่ ไม่เปลี่ยนตามเวลา เพื่อเสถียรภาพในการคลิก
                 if c5.button("❌ ปิดไม้นี้", key=f"btn_close_{side}_{idx_num}", use_container_width=True):
                     success = close_specific_virtual_order(side, amt)
                     if success:
@@ -396,11 +414,10 @@ with col_right:
     st.markdown("<h3>Signal Log (บันทึกสแกนเรียลไทม์)</h3>", unsafe_allow_html=True)
     with st.container(border=True):
         st.caption(f"⏱️ เวลาคลาวด์: {time.strftime('%H:%M:%S')}")
-        st.caption(f"• คอนฟิกแท่งเทียนย้อนหลัง: **ตัดลูปหาจุดกลับตัว 100 แท่งออกแล้ว**")
-        st.caption(f"• ตรวจจับแบบ: **Bar-by-Bar Reversal ตามต้นแบบ**")
+        st.caption(f"• พารามิเตอร์เพิ่มเงินทุน: **เปิดใช้งานสมบูรณ์**")
         st.caption(f"• ตัวเลขแกะรอยระบบ: `{log_debug}`")
         if signal in ["LONG", "SHORT"]:
-            st.markdown(f"<span style='color:#00e676;'>🎯 ยิงออเดอร์ฝั่ง {signal} ตามระบบต้นแบบสำเร็จ!</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color:#00e676;'>🎯 ยิงออเดอร์ฝั่ง {signal} ด้วย Margin ${current_mgn_active:.4f} สำเร็จ!</span>", unsafe_allow_html=True)
 
 time.sleep(3)
 st.rerun()
