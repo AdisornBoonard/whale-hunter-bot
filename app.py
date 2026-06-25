@@ -75,7 +75,6 @@ def calculate_mfi(df, length=14):
 def calculate_cci(df, length=14):
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     sma = typical_price.rolling(window=length).mean()
-    # ใช้ np.abs เพื่อรองรับ DataFrame ของ pandas ป้องกันการค้างเบื้องหลัง
     mad = typical_price.rolling(window=length).apply(lambda x: np.abs(x - x.mean()).mean())
     cci = (typical_price - sma) / (0.015 * mad)
     return cci
@@ -95,61 +94,92 @@ def get_balance():
 
 def update_trades_cache_safe():
     try:
-        trades = exchange.fetch_my_trades(symbol=SYMBOL, limit=20)
+        trades = exchange.fetch_my_trades(symbol=SYMBOL, limit=30)
         order_markers = []
         for t in trades:
             order_markers.append({
+                "timestamp": t['timestamp'],
                 "datetime": pd.to_datetime(t['timestamp'], unit='ms'),
                 "side": t.get('info', {}).get('positionSide', '').upper(),
                 "price": float(t['price']),
                 "amount": float(t['amount']),
                 "trade_side": t.get('side', '').lower()
             })
-        st.session_state.cached_trades = pd.DataFrame(order_markers)
+        # เรียงจากใหม่ไปเก่า (ล่าสุดอยู่บนสุด)
+        df_t = pd.DataFrame(order_markers)
+        if not df_t.empty:
+            df_t = df_t.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
+        st.session_state.cached_trades = df_t
     except:
         pass
 
 def process_virtual_orders_from_cache(live_price, active_margin, leverage, max_tickets_allowed):
     virtual_orders = []
     l_count, s_count = 0, 0
+    
     try:
         positions = exchange.fetch_positions()
-        active_sides = []
+        active_positions = {} # เก็บขนาดสัญญาที่มีอยู่จริง ณ ปัจจุบัน {'LONG': size, 'SHORT': size}
+        
         for pos in positions:
             size = float(pos.get('contracts', 0)) or float(pos.get('size', 0))
             if size != 0:
                 pos_symbol = pos.get('symbol', '').upper()
                 if 'GOLD' in pos_symbol or 'NCCO' in pos_symbol:
-                    active_sides.append(pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT'))
+                    side = pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT')
+                    active_positions[side] = abs(size)
 
-        if active_sides and not st.session_state.cached_trades.empty:
+        # หากมีฝั่งที่เปิดอยู่จริงในกระดาน และมีประวัติการเทรดใน Cache
+        if active_positions and not st.session_state.cached_trades.empty:
             df_t = st.session_state.cached_trades
-            for _, row in df_t.iterrows():
-                pos_side = row['side']
-                trade_side = row['trade_side']
+            
+            # วนลูปเช็กประวัติเทรดรายฝั่ง (กรองเฉพาะไม้เปิดสัญญา 'buy' สำหรับ LONG และ 'sell' สำหรับ SHORT)
+            for side, current_actual_size in active_positions.items():
+                target_trade_side = 'buy' if side == 'LONG' else 'sell'
                 
-                if pos_side in active_sides:
-                    if (pos_side == 'LONG' and trade_side == 'buy') or (pos_side == 'SHORT' and trade_side == 'sell'):
-                        if pos_side == 'LONG' and l_count < max_tickets_allowed:
+                # กรองเฉพาะฝั่งนั้นๆ และเป็นคำสั่งฝั่งเปิดไม้
+                df_filtered = df_t[(df_t['side'] == side) & (df_t['trade_side'] == target_trade_side)]
+                
+                accumulated_size = 0.0
+                ticket_index = 1
+                
+                for _, row in df_filtered.iterrows():
+                    # ตรวจสอบว่าขนาดสัญญารวมที่ดึงมา เกินกว่าขนาดตั๋วจริงบนกระดานปัจจุบันหรือไม่ (ป้องกันตั๋วเก่าค้าง)
+                    if accumulated_size >= current_actual_size:
+                        break
+                        
+                    amt = row['amount']
+                    # หากไม้เปิดนั้นทำให้ขนาดเกินกุมสัญญาจริง ให้ตัดยอดเอาแค่เท่าที่มีอยู่ปัจจุบัน
+                    if accumulated_size + amt > current_actual_size:
+                        amt = current_actual_size - accumulated_size
+                        
+                    if amt > 0.0001: # ป้องกันเศษทศนิยมขนาดเล็กมาก
+                        if side == 'LONG' and l_count < max_tickets_allowed:
                             l_count += 1
                             idx_num = l_count
-                        elif pos_side == 'SHORT' and s_count < max_tickets_allowed:
+                        elif side == 'SHORT' and s_count < max_tickets_allowed:
                             s_count += 1
                             idx_num = s_count
                         else:
+                            accumulated_size += amt
                             continue
                             
                         virtual_orders.append({
                             "Ticket": f"ไม้ที่ #{idx_num}",
                             "Index": idx_num,
-                            "Side": pos_side,
-                            "Amount": row['amount'],
+                            "Side": side,
+                            "Amount": amt,
                             "Entry": row['price'],
                             "Margin": round(active_margin, 2),
                             "Leverage": leverage
                         })
-    except:
+                        
+                        ticket_index += 1
+                    accumulated_size += row['amount']
+                    
+    except Exception as e:
         pass
+        
     return virtual_orders, l_count, s_count
 
 # --- 3. CORE TRADING ENGINE ---
@@ -222,7 +252,7 @@ def get_market_and_signal_safe(use_ema, ema_length, ema_reverse_dist, use_cci, c
     except Exception as ex:
         if not st.session_state.cached_df.empty:
             return st.session_state.cached_signal
-        return "ERROR", 0.0, 0, f"เชื่อมต่อล้มเหลว (กำลังรีลอง): {ex}", 0.0
+        return "ERROR", 0.0, 0, f"เชื่อมต่อล้มเหลา (กำลังรีลอง): {ex}", 0.0
 
 def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, is_manual=False):
     try:
@@ -314,14 +344,14 @@ with col_left:
         base_mgn = st.number_input("Margin ไม้แรก ($)", value=1.00, format="%.4f")  
         daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=3.00, format="%.4f")
         lev = st.number_input("Leverage (x)", value=250, min_value=1, max_value=250)
-        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=10)
+        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=3)
         
         st.session_state.tp_percent = st.slider("TP (%)", 0.1, 5.0, st.session_state.tp_percent)
         st.session_state.sl_percent = st.slider("SL (%)", 0.1, 5.0, st.session_state.sl_percent)
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>EMA FILTER CONFIG</h4>", unsafe_allow_html=True)
         u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
-        e_len = st.number_input("EMA Length", value=10, step=10) # <-- แก้ไขกลับมาเป็นค่าเริ่มต้น 20 ให้พี่แล้วครับ
+        e_len = st.number_input("EMA Length", value=20, step=10)
         e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>CCI REVERSAL FILTER</h4>", unsafe_allow_html=True)
@@ -401,7 +431,8 @@ with col_center:
     st.markdown("<h3>Virtual Positions (ระบบแยกตั๋วรายไม้)</h3>", unsafe_allow_html=True)
     
     if virtual_orders_list:
-        for order in virtual_orders_list:
+        # เรียงลำดับตั๋วบนหน้าจอตามไม้ที่พึ่งเข้าล่าสุด
+        for order in sorted(virtual_orders_list, key=lambda x: x['Index']):
             entry = order['Entry'] 
             amt = order['Amount']
             side = order['Side']
