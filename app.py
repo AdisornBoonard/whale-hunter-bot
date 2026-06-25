@@ -37,9 +37,9 @@ exchange.set_sandbox_mode(False)
 SYMBOL = 'NCCOGOLD2USD/USDT:USDT'
 TIMEFRAME = '1m'
 MFI_LENGTH = 14
-LOOKBACK = 100
+LOOKBACK = 20
 VOL_MULTIPLIER = 0.7
-EMA_LENGTH = 10
+EMA_LENGTH = 20
 USE_EMA = True
 
 init_cap = 0.6          
@@ -50,7 +50,19 @@ default_max_t = 5
 default_tp = 0.50       
 default_sl = 0.30       
 
-# --- 2. HELPERS FUNCTIONS ---
+# --- 2. INITIALIZE SESSION STATES FOR VIRTUAL ORDERS ---
+if 'virtual_orders' not in st.session_state:
+    st.session_state.virtual_orders = [] # เก็บตั๋วออเดอร์จำลองแยกไม้
+if 'order_counter' not in st.session_state:
+    st.session_state.order_counter = 1
+if 'logs' not in st.session_state: 
+    st.session_state.logs = [f"🟢 บอทเริ่มต้นระบบเงินจริง (มาร์จิ้นไม้แรก ${default_margin})"]
+if 'last_processed_bar' not in st.session_state: 
+    st.session_state.last_processed_bar = None
+if 'bot_active' not in st.session_state:
+    st.session_state.bot_active = True
+
+# --- 3. HELPERS FUNCTIONS ---
 def calculate_mfi(df, length=14):
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
@@ -66,16 +78,10 @@ def calculate_mfi(df, length=14):
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try: response = requests.post(url, json=payload)
+    try: requests.post(url, json=payload)
     except: pass
 
-if 'startup_alert_sent' not in st.session_state:
-    st.session_state.startup_alert_sent = True
-
-if 'bot_active' not in st.session_state:
-    st.session_state.bot_active = True
-
-# --- 3. CORE TRADING ENGINE ---
+# --- 4. CORE TRADING ENGINE ---
 def get_market_and_signal():
     try:
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=150)
@@ -124,54 +130,6 @@ def get_market_and_signal():
     except:
         return "ERROR", 0, None, pd.DataFrame()
 
-def check_account_positions():
-    active_positions = []
-    l_count, s_count = 0, 0
-    try:
-        positions = exchange.fetch_positions() 
-        
-        # 🔍 จุดดีบั๊กซ่อมทางเบื้องหลัง: ปริ้นท์ค่าดิบลง Terminal ของพี่เพื่อดูชื่อคีย์จริง
-        if positions:
-            print("\n=== DEBUG BINGX RAW POSTION DATA ===")
-            print(f"พบข้อมูลดิบทั้งหมดจำนวน: {len(positions)} รายการ")
-            # ลองพ่นออเดอร์แรกที่เจอออกดูโครงสร้างชื่อและสัญญาทันที
-            for idx, p in enumerate(positions):
-                p_size = float(p.get('contracts', 0)) or float(p.get('size', 0)) or float(p.get('initialMargin', 0))
-                if p_size != 0:
-                    print(f"[{idx}] Symbol: {p.get('symbol')} | Contracts: {p.get('contracts')} | Size: {p.get('size')} | Side: {p.get('side')}")
-            print("====================================\n")
-
-        for pos in positions:
-            # ดักรวบทุกคีย์ที่เป็นไปได้ของ BingX เพื่อไม่ให้เกิดค่า 0
-            size = float(pos.get('contracts', 0)) or float(pos.get('size', 0)) or float(pos.get('initialMargin', 0))
-            
-            if size != 0:
-                pos_symbol = str(pos.get('symbol', '')).upper()
-                
-                # 🔄 เอาเงื่อนไขดักคำออกชั่วคราว เพื่อบีบให้ทุกสัญญาที่เปิดอยู่ แสดงผลขึ้นหน้าจอก่อนทันที!
-                side = pos.get('side', '').upper()
-                if side == 'LONG' or size > 0: 
-                    l_count += 1
-                    side = 'LONG'
-                else: 
-                    s_count += 1
-                    side = 'SHORT'
-                
-                active_positions.append({
-                    "ID": pos.get('id', pos.get('info', {}).get('positionId', 'N/A')), 
-                    "Side": side, 
-                    "Size (Contracts)": abs(size), 
-                    "Entry": pos.get('entryPrice', pos.get('info', {}).get('avgPrice', 'N/A')),
-                    "Margin ($)": round(float(pos.get('initialMargin', 0)), 4) if pos.get('initialMargin') else 'N/A',
-                    "Leverage": f"{pos.get('leverage')}x" if pos.get('leverage') else 'N/A',
-                    "P/L ($)": round(float(pos.get('unrealizedPnl', 0)), 4) if pos.get('unrealizedPnl') else 0.0,
-                    "P/L (%)": f"{round(float(pos.get('percentage', 0)), 2)}%" if pos.get('percentage') else '0%'
-                })
-    except Exception as e:
-        print(f"Error fetching positions: {e}")
-        
-    return active_positions, l_count, s_count
-
 def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, is_manual=False):
     try:
         side = side.upper()
@@ -179,53 +137,59 @@ def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, i
         mode_text = "Manual (กดมือ)" if is_manual else "Auto (บอทยิง)"
         emoji_side = "🚀" if side == "LONG" else "💥"
         
-        tp_percent = tp_p / 100
-        sl_percent = sl_p / 100
-        
-        if side == "LONG":
-            tp_price = round(entry_price * (1 + tp_percent), 2)
-            sl_price = round(entry_price * (1 - sl_percent), 2)
-            order_side, pos_side = 'buy', 'LONG'
-        elif side == "SHORT":
-            tp_price = round(entry_price * (1 - tp_percent), 2)
-            sl_price = round(entry_price * (1 + sl_percent), 2)
-            order_side, pos_side = 'sell', 'SHORT'
-        else:
-            return f"❌ ไม่รู้จักฝั่ง {side}"
-
-        main_params = {'positionSide': pos_side}
+        main_params = {'positionSide': side}
         order = exchange.create_order(
-            symbol=SYMBOL, type='market', side=order_side, amount=contract_amount, params=main_params
+            symbol=SYMBOL, type='market', side='buy' if side == 'LONG' else 'sell', amount=contract_amount, params=main_params
         )
         
-        try:
-            tp_sl_side = 'sell' if side == 'LONG' else 'buy'
-            exchange.create_order(
-                symbol=SYMBOL, type='TAKE_PROFIT_MARKET', side=tp_sl_side, amount=contract_amount,
-                params={'positionSide': pos_side, 'stopPrice': tp_price, 'workingType': 'MARK_PRICE'}
-            )
-            exchange.create_order(
-                symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount,
-                params={'positionSide': pos_side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'}
-            )
-        except Exception as tp_sl_err:
-            print(f"⚠️ ตั้งเงื่อนไขราคา TP/SL พ่วงไม่สำเร็จ: {tp_sl_err}")
+        # สร้างตั๋วจำลองแยกไม้เก็บไว้ในระบบบอท
+        new_order = {
+            "Ticket": f"#{st.session_state.order_counter}",
+            "Side": side,
+            "Amount": contract_amount,
+            "Entry": entry_price,
+            "Margin": margin_size,
+            "Leverage": leverage,
+            "Time": time.strftime('%H:%M:%S')
+        }
+        st.session_state.virtual_orders.append(new_order)
+        st.session_state.order_counter += 1
 
         tg_msg = (
-            f"{emoji_side} *Whale Hunter เข้าออเดอร์เงินจริงแล้ว!*\n"
-            f"• *โหมดสั่งการ:* {mode_text}\n"
-            f"• *ฝั่งที่เปิด:* {pos_side}\n"
-            f"• *ราคาเข้าซื้อ:* ${entry_price}\n"
-            f"🎯 *เป้ากำไร (TP):* ${tp_price} ({tp_p}%)\n"
-            f"🛑 *ตัดขาดทุน (SL):* ${sl_price} ({sl_p}%)"
+            f"{emoji_side} *Whale Hunter เข้าออเดอร์จำลองแยกไม้แล้ว!*\n"
+            f"• *ตั๋วเลขที่:* #{st.session_state.order_counter-1}\n"
+            f"• *ฝั่ง:* {side} ({mode_text})\n"
+            f"• *ราคาเข้า:* ${entry_price}\n"
+            f"• *ขนาดสัญญา:* {contract_amount} สัญญา"
         )
         send_telegram_message(tg_msg)
-        return f"เปิด {pos_side} สำเร็จ ({mode_text})"
+        return f"เปิด {side} ตั๋ว #{st.session_state.order_counter-1} สำเร็จ"
     except Exception as e:
         return f"❌ สั่งซื้อล้มเหลว: {e}"
 
+def close_specific_virtual_order(ticket_id):
+    try:
+        # ค้นหาตั๋วจำลองเพื่อดึงขนาดสัญญาที่จะทำการเคลียร์ออก
+        for idx, order in enumerate(st.session_state.virtual_orders):
+            if order['Ticket'] == ticket_id:
+                side = order['Side']
+                amount = order['Amount']
+                close_side = 'sell' if side == 'LONG' else 'buy'
+                
+                # ส่งคำสั่ง Partial Close หักขนาดสัญญาไม้นั้นออกจากพอร์ตรวม Cross
+                exchange.create_order(
+                    symbol=SYMBOL, type='market', side=close_side, amount=amount, params={'positionSide': side}
+                )
+                
+                st.session_state.virtual_orders.pop(idx)
+                return f"✅ ปิดตั๋ว {ticket_id} ขนาด {amount} สำเร็จ"
+        return "❌ ไม่พบตั๋วออเดอร์นี้ในระบบ"
+    except Exception as e:
+        return f"❌ เกิดข้อผิดพลาดในการสั่งปิดตั๋ว: {e}"
+
 def close_all_positions():
     try:
+        # สั่งเครียร์พอร์ตหลังบ้านจริงทั้งหมด
         positions = exchange.fetch_positions() 
         closed_count = 0
         for pos in positions:
@@ -237,39 +201,30 @@ def close_all_positions():
                     symbol=SYMBOL, type='market', side=close_side, amount=abs(size), params={'positionSide': side}
                 )
                 closed_count += 1
+        # ล้างตั๋วในระบบบอททั้งหมดออก
+        st.session_state.virtual_orders = []
         if closed_count > 0:
-            return f"✅ เคลียร์พอร์ตสำเร็จ (ปิดไปทั้งหมด {closed_count} ไม้)"
-        return "ℹ️ ไม่มีออเดอร์ค้างให้ทำการปิด"
+            return f"✅ เคลียร์พอร์ตหลังบ้านและล้างตั๋วจำลองทั้งหมดเรียบร้อย"
+        return "ℹ️ ไม่มีออเดอร์ค้างในระบบ"
     except Exception as e:
-        return f"❌ เกิดข้อผิดพลาดในการสั่งปิด: {e}"
+        return f"❌ ล้มเหลว: {e}"
 
-# --- 4. STREAMLIT FRONT-END ---
+# --- 5. STREAMLIT FRONT-END ---
 bot_status_indicator = "● LIVE AUTOTRADING ACTIVE" if st.session_state.bot_active else "○ AUTOTRADING DISABLED"
 bot_status_color = "#00e676" if st.session_state.bot_active else "#ff1744"
 
 st.markdown(f"""
 <div style="background-color: #12161f; border: 1px solid #1e2533; padding: 10px 20px; border-radius: 6px; margin-bottom: 20px;">
-    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.2</span>
-    <span style="font-size: 13px; color: #7a8599; margin-left: 15px;">Stable Entry EMA Reversal</span>
+    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.2 - VIRTUAL TRACKING</span>
     <span style="float: right; color: {bot_status_color}; font-weight: bold; padding-top: 5px;">{bot_status_indicator}</span>
 </div>
 """, unsafe_allow_html=True)
 
-if 'logs' not in st.session_state: 
-    st.session_state.logs = [f"🟢 บอทเริ่มต้นระบบเงินจริง (มาร์จิ้นไม้แรก ${default_margin})"]
-if 'last_processed_bar' not in st.session_state: st.session_state.last_processed_bar = None
-if 'tracked_positions' not in st.session_state: st.session_state.tracked_positions = {}
-
-positions_list, active_l, active_s = check_account_positions()
 signal, live_price, bar_time, df_market = get_market_and_signal()
 
-current_pos_ids = [p['ID'] for p in positions_list]
-for pos_id, pos_info in list(st.session_state.tracked_positions.items()):
-    if pos_id not in current_pos_ids:
-        del st.session_state.tracked_positions[pos_id]
-
-for p in positions_list:
-    st.session_state.tracked_positions[p['ID']] = {"Side": p['Side'], "Entry": p['Entry']}
+# นับจำนวนฝั่งจากตั๋วเสมือน
+active_l = sum(1 for o in st.session_state.virtual_orders if o['Side'] == 'LONG')
+active_s = sum(1 for o in st.session_state.virtual_orders if o['Side'] == 'SHORT')
 
 col_left, col_center, col_right = st.columns([1, 2, 1])
 
@@ -278,7 +233,6 @@ with col_left:
     with st.container(border=True):
         st.number_input("ทุนเริ่มต้น ($)", value=init_cap, disabled=True)
         base_mgn = st.number_input("Margin ไม้แรก ($)", value=default_margin, format="%.2f")  
-        daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=default_daily, format="%.2f")
         lev = st.number_input("Leverage (x)", value=default_lev, min_value=1, max_value=250)
         max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=default_max_t)
         
@@ -310,11 +264,12 @@ with col_left:
                 st.rerun()
         
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
-        if st.button("🛑 CLOSE ALL POSITIONS (ปิดทุกไม้ทันที)", use_container_width=True, type="secondary"):
+        if st.button("🛑 CLOSE ALL POSITIONS (ล้างพอร์ตทั้งหมด)", use_container_width=True, type="secondary"):
             res = close_all_positions()
             st.session_state.logs.append(f"🚨 [{time.strftime('%H:%M:%S')}] {res}")
             st.rerun()
 
+# --- บอทออโต้สแกนยิงตามสัญญาณ ---
 if st.session_state.bot_active and signal in ["LONG", "SHORT"] and bar_time != st.session_state.last_processed_bar:
     if signal == "LONG" and active_l < max_t:
         res = fire_execution_order("LONG", live_price, base_mgn, lev, tp_p, sl_p)
@@ -335,23 +290,46 @@ with col_center:
             x=df_market['datetime'], open=df_market['open'], high=df_market['high'],
             low=df_market['low'], close=df_market['close'], name="ราคาตลาด"
         ))
-        fig.add_trace(px.Scatter(
-            x=df_market['datetime'], y=df_market['ema'], mode='lines',
-            line=dict(color='#ff9100', width=1.5), name=f"EMA({EMA_LENGTH})"
-        ))
         fig.update_layout(
             template="plotly_dark", paper_bgcolor='#12161f', plot_bgcolor='#12161f',
-            margin=dict(l=5, r=5, t=5, b=5), height=280, xaxis_rangeslider_visible=False
+            margin=dict(l=5, r=5, t=5, b=5), height=240, xaxis_rangeslider_visible=False
         )
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.error("❌ ไม่สามารถดึงข้อมูลกราฟเทคนิคอลได้")
 
-    st.markdown("<h3>Positions (เรียลไทม์จาก BingX เงินจริง)</h3>", unsafe_allow_html=True)
-    if positions_list:
-        st.dataframe(pd.DataFrame(positions_list), use_container_width=True, hide_index=True)
+    # --- ตารางแสดงออเดอร์จำลองแยกไม้แบบแกะกล่องสแกนรายตัว ---
+    st.markdown("<h3>Virtual Positions (ระบบจำลองแยกไม้)</h3>", unsafe_allow_html=True)
+    if st.session_state.virtual_orders:
+        for order in st.session_state.virtual_orders:
+            # คำนวณ P/L ของตั๋วใบนี้เทียบกับราคาตลาดปัจจุบัน ณ วินาทีนี้แบบแมนนวล
+            entry = order['Entry']
+            amt = order['Amount']
+            side = order['Side']
+            
+            if side == "LONG":
+                pnl_usd = (live_price - entry) * amt
+                pnl_pct = ((live_price - entry) / entry) * 100 * order['Leverage']
+            else:
+                pnl_usd = (entry - live_price) * amt
+                pnl_pct = ((entry - live_price) / entry) * 100 * order['Leverage']
+            
+            pnl_color = "#00e676" if pnl_usd >= 0 else "#ff1744"
+            
+            # วาดแถวข้อมูลและปุ่มสั่ง Partial Close แยกทีละตั๋ว
+            with st.container(border=True):
+                c1, c2, c3, c4, c5 = st.columns([1, 1.5, 2, 2, 1.5])
+                c1.markdown(f"**{order['Ticket']}** \n <span style='color:#7a8599;'>{order['Time']}</span>", unsafe_allow_html=True)
+                
+                badge_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
+                c2.markdown(f"{badge_side}\n`Amt: {amt}`", unsafe_allow_html=True)
+                c3.markdown(f"Entry: `${entry}`\nMargin: `${order['Margin']}`", unsafe_allow_html=True)
+                c4.markdown(f"<span style='color:{pnl_color}; font-weight:bold;'>P/L: ${pnl_usd:.4f}<br>({pnl_pct:.2f}%)</span>", unsafe_allow_html=True)
+                
+                if c5.button("❌ ปิดไม้นี้", key=f"close_{order['Ticket']}", use_container_width=True):
+                    res = close_specific_virtual_order(order['Ticket'])
+                    st.session_state.logs.append(f"🚨 [{time.strftime('%H:%M:%S')}] {res}")
+                    st.rerun()
     else:
-        st.info("ℹ️ พอร์ตว่างเปล่า (ไม่มีออเดอร์ค้างในโหมดคอสมาจิ้น)")
+        st.info("ℹ️ พอร์ตจำลองว่างเปล่า (รอสัญญาณหรือกดเปิดมือเพื่อสร้างตั๋วแยกไม้)")
 
 with col_right:
     st.markdown("<h3>Performance Dashboard</h3>", unsafe_allow_html=True)
@@ -360,15 +338,14 @@ with col_right:
         m1.metric("Net Equity", f"${init_cap}")
         m2.metric("Margin ไม้แรก", f"${base_mgn}")
         m3, m4 = st.columns(2)
-        m3.metric("Active L/S", f"{active_l} / {active_s}")
+        m3.metric("Active L/S (ตั๋ว)", f"{active_l} / {active_s}")
         m4.metric("Live Price", f"${live_price}")
         st.markdown("<hr style='margin:10px 0; border-color:#1e2533;'>", unsafe_allow_html=True)
-        st.caption(f"• เพิ่ม Margin รายวัน: +${daily_add}")
         st.caption(f"• สถานะระบบวิเคราะห์: {signal}")
 
     st.markdown("<h3>Signal Log (บันทึกสแกน)</h3>", unsafe_allow_html=True)
     with st.container(border=True):
-        for log in reversed(st.session_state.logs[-6:]):
+        for log in reversed(st.session_state.logs[-8:]):
             st.caption(log)
 
 time.sleep(2)
