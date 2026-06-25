@@ -314,14 +314,14 @@ with col_left:
         base_mgn = st.number_input("Margin ไม้แรก ($)", value=1.00, format="%.4f")  
         daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=3.00, format="%.4f")
         lev = st.number_input("Leverage (x)", value=250, min_value=1, max_value=250)
-        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=3)
+        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=10)
         
         st.session_state.tp_percent = st.slider("TP (%)", 0.1, 5.0, st.session_state.tp_percent)
         st.session_state.sl_percent = st.slider("SL (%)", 0.1, 5.0, st.session_state.sl_percent)
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>EMA FILTER CONFIG</h4>", unsafe_allow_html=True)
         u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
-        e_len = st.number_input("EMA Length", value=20, step=10) # <-- แก้ไขกลับมาเป็นค่าเริ่มต้น 20 ให้พี่แล้วครับ
+        e_len = st.number_input("EMA Length", value=10, step=10) # <-- แก้ไขกลับมาเป็นค่าเริ่มต้น 20 ให้พี่แล้วครับ
         e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>CCI REVERSAL FILTER</h4>", unsafe_allow_html=True)
