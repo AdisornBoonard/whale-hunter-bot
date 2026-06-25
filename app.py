@@ -9,7 +9,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURATION & STYLING ---
-st.set_page_config(page_title="Whale Hunter V7.8 - Dynamic Margin Core", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Whale Hunter V8.0 - CCI & EMA Reversal", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -40,17 +40,15 @@ SYMBOL = 'NCCOGOLD2USD/USDT:USDT'
 TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
-EMA_LENGTH = 20
-USE_EMA = True
-EMA_REVERSE_DIST = 1.5  
+EMA_LENGTH = 200 # ปรับตาม Pine Script V8.0
 
-# --- ⚙️ PERSISTENT TIME TRACKING (ระบบจำเวลาจำลองจำนวนวันเพิ่มทุนตามต้นแบบ) ---
+# --- ⚙️ PERSISTENT TIME TRACKING ---
 if 'bot_start_time' not in st.session_state:
     st.session_state.bot_start_time = time.time()
 if 'tp_percent' not in st.session_state:
-    st.session_state.tp_percent = 0.50
+    st.session_state.tp_percent = 1.50 # ปรับเริ่มต้นตาม V8.0
 if 'sl_percent' not in st.session_state:
-    st.session_state.sl_percent = 0.30
+    st.session_state.sl_percent = 1.00 # ปรับเริ่มต้นตาม V8.0
 if 'bot_active' not in st.session_state:
     st.session_state.bot_active = True
 
@@ -66,6 +64,13 @@ def calculate_mfi(df, length=14):
     pos_mf = positive_flow.rolling(window=length).sum()
     neg_mf = negative_flow.rolling(window=length).sum()
     return 100 - (100 / (1 + (pos_mf / neg_mf.abs())))
+
+def calculate_cci(df, length=14):
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    sma = typical_price.rolling(window=length).mean()
+    mad = typical_price.rolling(window=length).apply(lambda x: pd.Series(x).mad())
+    cci = (typical_price - sma) / (0.015 * mad)
+    return cci
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -83,8 +88,8 @@ def get_balance():
     except:
         return 0.0, 0.0
 
-# --- 3. CORE TRADING ENGINE ---
-def get_market_and_signal():
+# --- 3. CORE TRADING ENGINE (อัปเกรดตรรกะ V8.0 CCI + EMA) ---
+def get_market_and_signal(use_ema, ema_reverse_dist, use_cci, cci_length, cci_ob, cci_os):
     try:
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=150)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -93,6 +98,7 @@ def get_market_and_signal():
         df['mfi'] = calculate_mfi(df, length=MFI_LENGTH)
         df['ema'] = df['close'].ewm(span=EMA_LENGTH, adjust=False).mean()
         df['v_ma'] = df['volume'].rolling(window=20).mean()
+        df['cci'] = calculate_cci(df, length=cci_length)
         
         idx = len(df) - 2
         c_close = df.iloc[idx]['close']
@@ -102,6 +108,7 @@ def get_market_and_signal():
         c_mfi   = df.iloc[idx]['mfi']
         c_vma   = df.iloc[idx]['v_ma']
         c_ema   = df.iloc[idx]['ema']
+        c_cci   = df.iloc[idx]['cci']
         
         p_high  = df.iloc[idx-1]['high']
         p_low   = df.iloc[idx-1]['low']
@@ -118,11 +125,12 @@ def get_market_and_signal():
         ema_bear = c_close < c_ema
         
         ema_distance = abs(c_close - c_ema) / c_ema * 100
-        far_from_ema = ema_distance >= EMA_REVERSE_DIST
+        far_from_ema = ema_distance >= ema_reverse_dist
         
         l_sig, s_sig = False, False
         
-        if not USE_EMA:
+        # 1. ประมวลผลขั้นที่หนึ่ง: EMA Filter
+        if not use_ema:
             l_sig = long_base
             s_sig = short_base
         else:
@@ -141,21 +149,32 @@ def get_market_and_signal():
                     if ema_bear: s_sig = True
                     else: l_sig = True
                     
+        # 2. ประมวลผลขั้นที่สอง: CCI Reversal 
+        if use_cci and (l_sig or s_sig):
+            if cci_val > cci_ob:
+                s_sig = True
+                l_sig = False
+            elif cci_val < cci_os:
+                l_sig = True
+                s_sig = False
+                
         live_price = df.iloc[-1]['close']
+        live_cci = df.iloc[-1]['cci']
         bar_time = df.iloc[-1]['timestamp']
         
-        if l_sig: return "LONG", live_price, bar_time, df, "SIGNAL_TRIGGERED"
-        if s_sig: return "SHORT", live_price, bar_time, df, "SIGNAL_TRIGGERED"
-        return "HOLD", live_price, bar_time, df, f"Scanning.. Dist: {ema_distance:.2f}%"
+        debug_txt = f"Dist: {ema_distance:.2f}% | CCI: {live_cci:.2f}"
+        
+        if l_sig: return "LONG", live_price, bar_time, df, "SIGNAL_TRIGGERED", live_cci
+        if s_sig: return "SHORT", live_price, bar_time, df, "SIGNAL_TRIGGERED", live_cci
+        return "HOLD", live_price, bar_time, df, debug_txt, live_cci
     except Exception as ex:
-        return "ERROR", 0, None, pd.DataFrame(), str(ex)
+        return "ERROR", 0, None, pd.DataFrame(), str(ex), 0.0
 
 def rebuild_virtual_orders(live_price, active_margin, leverage):
     virtual_orders = []
     l_count, s_count = 0, 0
     try:
         positions = exchange.fetch_positions()
-        # ใช้ active_margin (ค่าปัจจุบันที่บวกรายวันแล้ว) มาแตกสัดส่วนไม้จำลองให้ตรงความจริง
         one_ticket_amt = round((active_margin * leverage) / live_price, 4) if live_price > 0 else 0.0001
         
         for pos in positions:
@@ -216,7 +235,7 @@ def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, i
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': pos_side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = (f"{emoji_side} *Whale Hunter V7.8 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n• *ใช้ Margin จริง:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
+        tg_msg = (f"{emoji_side} *Whale Hunter V8.0 ยิงสำเร็จ!*\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {pos_side}\n• *ราคาเข้า:* ${entry_price}\n• *ใช้ Margin จริง:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}")
         send_telegram_message(tg_msg)
         return f"เปิด {pos_side} สำเร็จ"
     except Exception as e:
@@ -255,36 +274,42 @@ bot_status_color = "#00e676" if st.session_state.bot_active else "#ff1744"
 
 st.markdown(f"""
 <div style="background-color: #12161f; border: 1px solid #1e2533; padding: 10px 20px; border-radius: 6px; margin-bottom: 20px;">
-    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V7.8 - DYNAMIC DAILY MARGIN</span>
+    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V8.0 - CCI & EMA REVERSAL ENGINE</span>
     <span style="float: right; color: {bot_status_color}; font-weight: bold; padding-top: 5px;">{bot_status_indicator}</span>
 </div>
 """, unsafe_allow_html=True)
-
-signal, live_price, bar_time, df_market, log_debug = get_market_and_signal()
-total_capital, available_capital = get_balance()
 
 col_left, col_center, col_right = st.columns([1, 2, 1])
 
 with col_left:
     st.markdown("<h3>Configuration</h3>", unsafe_allow_html=True)
     with st.container(border=True):
+        total_capital, available_capital = get_balance()
         st.metric("เงินทุนสุทธิในกระดาน", f"${total_capital}")
         
-        # 🛠️ หน้าคอนฟิกเพิ่มช่องกรอกข้อมูล ทุนแรกเริ่ม และ เงินทุนเพิ่มรายวัน ตามที่พี่ต้องการ
-        base_mgn = st.number_input("Margin ไม้แรก ($)", value=1.00, format="%.4f", step=0.01)  
-        daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=3.00, format="%.4f", step=0.01)
+        base_mgn = st.number_input("Margin ไม้แรก ($)", value=1.00, format="%.4f", step=0.1)  
+        daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=0.03, format="%.4f", step=0.01)
         
         lev = st.number_input("Leverage (x)", value=250, min_value=1, max_value=250)
-        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=5)
+        max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=3)
         
         st.session_state.tp_percent = st.slider("TP (%)", 0.1, 5.0, st.session_state.tp_percent)
         st.session_state.sl_percent = st.slider("SL (%)", 0.1, 5.0, st.session_state.sl_percent)
         
-        # 🎯 คำนวณหาค่าคุ้มครอง Margin จริง ณ ปัจจุบันตามสูตรต้นแบบเป๊ะๆ
+        # --- 🛠️ >>> NEW: CCI SETTINGS ON SIDEBAR PANEL <<< ---
+        st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>CCI REVERSAL FILTER</h4>", unsafe_allow_html=True)
+        u_cci = st.checkbox("เปิดใช้งาน CCI Reversal", value=True)
+        c_len = st.number_input("CCI Length", value=14, min_value=1)
+        c_ob = st.number_input("CCI Overbought (Sell)", value=100.0, step=10.0)
+        c_os = st.number_input("CCI Oversold (Long)", value=-100.0, step=10.0)
+        
+        # --- EMA Toggle Option ---
+        u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
+        e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
+        
         days_passed = math.floor((time.time() - st.session_state.bot_start_time) / (24 * 60 * 60))
         current_mgn_active = base_mgn + (days_passed * daily_add)
         
-        # 🎯 โชว์สถานะตั๋วกล่องสีฟ้าเด่นๆ ว่าปัจจุบันใช้มาร์จิ้นเปิดออเดอร์เท่าไหร่
         st.markdown(f"""
             <div class='margin-box'>
                 <span style='font-size: 11px; color: #bbdefb;'>รันมาแล้ว {days_passed} วัน</span><br>
@@ -297,8 +322,8 @@ with col_left:
         with c_status_1:
             if st.button("🟢 เปิดรันบอท", use_container_width=True):
                 st.session_state.bot_active = True
-                st.session_state.bot_start_time = time.time() # รีเซ็ตวันที่ 1 ใหม่ตอนเปิดรัน
-                send_telegram_message(f"🟢 *Whale Hunter:* เริ่มรันระบบด้วยฐานมาร์จิ้น ${base_mgn}")
+                st.session_state.bot_start_time = time.time()
+                send_telegram_message(f"🟢 *Whale Hunter V8.0:* เริ่มรันระบบพร้อมตัวกรอง CCI")
                 st.rerun()
         with c_status_2:
             if st.button("🛑 ปิดระบบบอท", use_container_width=True):
@@ -311,7 +336,6 @@ with col_left:
         c_buy, c_sell = st.columns(2)
         with c_buy:
             if st.button("🚀 OPEN LONG", use_container_width=True):
-                # ใช้ค่ามาร์จิ้นที่คำนวณสะสมส่งเข้าออเดอร์
                 res = fire_execution_order("LONG", live_price, current_mgn_active, lev, st.session_state.tp_percent, st.session_state.sl_percent, is_manual=True)
                 st.rerun()
         with c_sell:
@@ -322,10 +346,11 @@ with col_left:
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
         if st.button("🛑 CLOSE ALL POSITIONS (เคลียร์พอร์ต)", use_container_width=True, type="secondary"):
             res = close_all_positions()
-            send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดหน้าพอร์ตจริงทั้งหมดเรียบร้อย")
+            send_telegram_message(f"🚨 *Whale Hunter:* สั่งเคลียร์พอร์ตผ่านหน้าจอบอท")
             st.rerun()
 
-# วิ่งมาดึงตั๋วจำลองโดยอิงตามค่า Margin ที่แปรผัน ณ ปัจจุบัน
+# เรียกประมวลผลตรรกะ V8.0
+signal, live_price, bar_time, df_market, log_debug, current_cci_val = get_market_and_signal(u_ema, e_dist, u_cci, c_len, c_ob, c_os)
 virtual_orders_list, active_l, active_s = rebuild_virtual_orders(live_price, current_mgn_active, lev)
 
 # --- ระบบออโต้สแกนยิงคำสั่ง ---
@@ -395,7 +420,7 @@ with col_center:
                 if c5.button("❌ ปิดไม้นี้", key=f"btn_close_{side}_{idx_num}", use_container_width=True):
                     success = close_specific_virtual_order(side, amt)
                     if success:
-                        send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดไม้ {side} ขนาด {amt} ผ่านหน้าจอสำเร็จ")
+                        send_telegram_message(f"🚨 *Whale Hunter:* สั่งปิดไม้ {side} ผ่านหน้าจอสำเร็จ")
                         time.sleep(0.5)
                         st.rerun()
     else:
@@ -410,14 +435,17 @@ with col_right:
         m3, m4 = st.columns(2)
         m3.metric("สรุปไม้จริง (L/S)", f"{active_l} / {active_s}")
         m4.metric("Live Price", f"${live_price}")
+        
+        # 🟢 โชว์ค่า CCI สด ๆ บนหน้าแดชบอร์ดขวาด้วยครับ
+        st.metric("Live CCI Value", f"{current_cci_val:.2f}")
 
     st.markdown("<h3>Signal Log (บันทึกสแกนเรียลไทม์)</h3>", unsafe_allow_html=True)
     with st.container(border=True):
         st.caption(f"⏱️ เวลาคลาวด์: {time.strftime('%H:%M:%S')}")
-        st.caption(f"• พารามิเตอร์เพิ่มเงินทุน: **เปิดใช้งานสมบูรณ์**")
+        st.caption(f"• โมดูล CCI Filter: **{'ON' if u_cci else 'OFF'}**")
         st.caption(f"• ตัวเลขแกะรอยระบบ: `{log_debug}`")
         if signal in ["LONG", "SHORT"]:
-            st.markdown(f"<span style='color:#00e676;'>🎯 ยิงออเดอร์ฝั่ง {signal} ด้วย Margin ${current_mgn_active:.4f} สำเร็จ!</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color:#00e676;'>🎯 สแกนเจอและยิงสัญญาณฝั่ง {signal} สมบูรณ์!</span>", unsafe_allow_html=True)
 
 time.sleep(3)
 st.rerun()
