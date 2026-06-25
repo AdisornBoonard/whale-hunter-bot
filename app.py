@@ -41,7 +41,7 @@ TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
-# --- ⚙️ PERSISTENT ENGINE STATES ---
+# --- ⚙️ PERSISTENT ENGINE STATES (ระบบจดจำรอบบอท) ---
 if 'bot_start_time' not in st.session_state:
     st.session_state.bot_start_time = time.time()
 if 'tp_percent' not in st.session_state:
@@ -87,16 +87,14 @@ def get_balance():
     except:
         return 0.0, 0.0
 
-# 🎯 ฟังก์ชันดึงประวัติคำสั่งซื้อขายจริงจาก BingX เพื่อนำไปวาดหมุดบนกราฟแบบไม่เพี้ยน
+# ฟังก์ชันดึงประวัติเปิดออเดอร์จริงมาวางพิกัดบนกราฟป้องกันจุดเพี้ยนเวลาบอทรันข้ามรอบ
 def get_executed_orders_from_exchange():
     order_markers = []
     try:
         trades = exchange.fetch_my_trades(symbol=SYMBOL, limit=40)
         for t in trades:
-            # คัดกรองเฉพาะคำสั่งที่เป็นการเปิด Position ใหม่ (ไม่ใช่คำสั่งปิดพอร์ต/TP/SL)
             if t.get('info', {}).get('positionSide') in ['LONG', 'SHORT'] and t.get('side') in ['buy', 'sell']:
                 pos_side = t['info']['positionSide']
-                # เช็กว่าเป็นคำสั่งเปิดออเดอร์หลัก
                 if (pos_side == 'LONG' and t['side'] == 'buy') or (pos_side == 'SHORT' and t['side'] == 'sell'):
                     order_markers.append({
                         "datetime": pd.to_datetime(t['timestamp'], unit='ms'),
@@ -115,7 +113,7 @@ def get_market_and_signal(use_ema, ema_length, ema_reverse_dist, use_cci, cci_le
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
         
         df['mfi'] = calculate_mfi(df, length=MFI_LENGTH)
-        df['ema'] = df['close'].ewm(span=ema_length, adjust=False).mean() # 🛠️ คำนวณแบบ Dynamic ตามที่ตั้งค่า
+        df['ema'] = df['close'].ewm(span=ema_length, adjust=False).mean() # 🛠️ ปรับเป็น Dynamic ความยาวเส้นตามต้องการ
         df['v_ma'] = df['volume'].rolling(window=20).mean()
         df['cci'] = calculate_cci(df, length=cci_length)
         
@@ -187,11 +185,13 @@ def get_market_and_signal(use_ema, ema_length, ema_reverse_dist, use_cci, cci_le
     except Exception as ex:
         return "ERROR", 0, None, pd.DataFrame(), str(ex), 0.0
 
-def rebuild_virtual_orders(live_price, active_margin, leverage):
+# 🛠️ ระบบคัดกรองข้อมูลไม้จริงแบบแตกราคาเข้าอิสระ ป้องกันเศษทศนิยมปูดไม้เกินจริง
+def rebuild_virtual_orders(live_price, active_margin, leverage, max_tickets_allowed):
     virtual_orders = []
     l_count, s_count = 0, 0
     try:
         positions = exchange.fetch_positions()
+        # คำนวณหาขนาดมาตรฐานของสัญญาต่อ 1 ตั๋ว
         one_ticket_amt = round((active_margin * leverage) / live_price, 4) if live_price > 0 else 0.0001
         
         for pos in positions:
@@ -203,7 +203,10 @@ def rebuild_virtual_orders(live_price, active_margin, leverage):
                     real_entry_price = float(pos.get('entryPrice', live_price))
                     total_amt = abs(size)
                     
-                    num_tickets = max(1, round(total_amt / one_ticket_amt))
+                    # 🎯 ใช้ math.floor ดักปัดเศษลง และใช้ min ครอบล็อกไว้ไม่ให้จำนวนไม้ในตารางปูดเกินจริง
+                    raw_tickets = math.floor(total_amt / one_ticket_amt)
+                    num_tickets = max(1, min(raw_tickets, max_tickets_allowed))
+                    
                     if side == 'LONG': l_count = num_tickets
                     else: s_count = num_tickets
                     
@@ -213,7 +216,7 @@ def rebuild_virtual_orders(live_price, active_margin, leverage):
                             "Index": i+1,
                             "Side": side,
                             "Amount": round(total_amt / num_tickets, 4),
-                            "Entry": real_entry_price, 
+                            "Entry": real_entry_price, # ใช้ Logic ประมวลผลแยกราคา TP/SL ขาดจากกันแบบเดิมของพี่
                             "Margin": round(active_margin, 2),
                             "Leverage": leverage
                         })
@@ -312,10 +315,10 @@ with col_left:
         st.session_state.tp_percent = st.slider("TP (%)", 0.1, 5.0, st.session_state.tp_percent)
         st.session_state.sl_percent = st.slider("SL (%)", 0.1, 5.0, st.session_state.sl_percent)
         
-        # --- 🛠️ EMA Filter Options (เพิ่มกล่องปรับ Length) ---
+        # --- 🛠️ EMA Filter Options (มีช่องปรับตั้งค่าความยาวและระยะห่างครบถ้วน) ---
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>EMA FILTER CONFIG</h4>", unsafe_allow_html=True)
         u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
-        e_len = st.number_input("EMA Length", value=200, min_value=1, step=10) # 🎯 สามารถปรับค่า Length ได้ที่นี่เลยครับพี่
+        e_len = st.number_input("EMA Length", value=200, min_value=1, step=10) # 🎯 ช่องกรอกความยาวเส้นอิสระตามคำสั่งซื้อ
         e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
         
         # --- CCI Reversal Parameters ---
@@ -341,7 +344,7 @@ with col_left:
             if st.button("🟢 เปิดรันบอท", use_container_width=True):
                 st.session_state.bot_active = True
                 st.session_state.bot_start_time = time.time()
-                send_telegram_message(f"🟢 *Whale Hunter V8.2:* เริ่มรันระบบปรับปรุงใหม่")
+                send_telegram_message(f"🟢 *Whale Hunter V8.2:* เริ่มรันระบบแยกคำนวณไม้แบบอิสระ")
                 st.rerun()
         with c_status_2:
             if st.button("🛑 ปิดระบบบอท", use_container_width=True):
@@ -366,9 +369,10 @@ with col_left:
             res = close_all_positions()
             st.rerun()
 
-# ประมวลผลสัญญาณ
+# ประมวลผลและดึงข้อมูลตลาด
 signal, live_price, bar_time, df_market, log_debug, current_cci_val = get_market_and_signal(u_ema, e_len, e_dist, u_cci, c_len, c_ob, c_os)
-virtual_orders_list, active_l, active_s = rebuild_virtual_orders(live_price, current_mgn_active, lev)
+# 🛠️ ส่งค่า max_t เข้าไปล็อกเพดานจำลองไม้ตาราง Virtual Positions
+virtual_orders_list, active_l, active_s = rebuild_virtual_orders(live_price, current_mgn_active, lev, max_t)
 
 # --- ระบบออโต้สแกนยิงคำสั่ง ---
 if st.session_state.bot_active and signal in ["LONG", "SHORT"]:
@@ -392,7 +396,7 @@ with col_center:
         fig = px.Figure()
         fig.add_trace(px.Candlestick(x=df_market['datetime'], open=df_market['open'], high=df_market['high'], low=df_market['low'], close=df_market['close'], name="ราคา"))
         
-        # 🛠️ ดึงประวัติที่เทรดจาก API ของ BingX ตรงๆ มาจุดบนกราฟแบบเรียลไทม์ แกนเวลาตรงแน่นอนครับ
+        # ดึงประวัติเข้าออเดอร์หลักตรงจาก exchange มาแสดงจุดพลอตแบบเสถียร 
         hist_df = get_executed_orders_from_exchange()
         if not hist_df.empty:
             long_marks = hist_df[hist_df['side'] == 'LONG']
@@ -408,6 +412,7 @@ with col_center:
         fig.update_layout(template="plotly_dark", paper_bgcolor='#12161f', plot_bgcolor='#12161f', margin=dict(l=5, r=5, t=5, b=5), height=240, xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
+    # 🛠️ แสดงตารางไม้เสมือนตามเงื่อนไข Advance Virtualizer แยกตรวจจับรายตั๋ว
     st.markdown("<h3>Virtual Positions (ตารางแยกคำนวณรายไม้แบบอิสระ)</h3>", unsafe_allow_html=True)
     if virtual_orders_list:
         for order in virtual_orders_list:
