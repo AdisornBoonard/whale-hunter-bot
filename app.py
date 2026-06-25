@@ -288,7 +288,7 @@ with col_left:
         st.metric("เงินทุนสุทธิในกระดาน", f"${total_capital}")
         
         base_mgn = st.number_input("Margin ไม้แรก ($)", value=1.00, format="%.4f", step=0.1)  
-        daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=0.03, format="%.4f", step=0.01)
+        daily_add = st.number_input("เพิ่ม Margin วันละ ($)", value=3.00, format="%.4f", step=0.01)
         
         lev = st.number_input("Leverage (x)", value=250, min_value=1, max_value=250)
         max_t = st.number_input("เปิดสูงสุด (ต่อฝั่ง)", value=3)
