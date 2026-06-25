@@ -3,13 +3,14 @@ import time
 import math
 import ccxt
 import requests
+import numpy as np  # <-- อิมพอร์ตสำหรับแก้ปัญหาคำนวณ CCI พังจนกราฟไม่ขึ้น
 import pandas as pd
 import plotly.graph_objects as px
 import streamlit as st
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURATION & STYLING ---
-st.set_page_config(page_title="Whale Hunter V8.7 - Multi-Ticket 24H", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Whale Hunter V8.8 - Multi-Ticket Fixed", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -74,7 +75,8 @@ def calculate_mfi(df, length=14):
 def calculate_cci(df, length=14):
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     sma = typical_price.rolling(window=length).mean()
-    mad = typical_price.rolling(window=length).apply(lambda x: pd.Series(x).mad() if hasattr(pd.Series(x), 'mad') else np.abs(x - x.mean()).mean())
+    # ใช้ np.abs เพื่อรองรับ DataFrame ของ pandas ป้องกันการค้างเบื้องหลัง
+    mad = typical_price.rolling(window=length).apply(lambda x: np.abs(x - x.mean()).mean())
     cci = (typical_price - sma) / (0.015 * mad)
     return cci
 
@@ -211,7 +213,6 @@ def get_market_and_signal_safe(use_ema, ema_length, ema_reverse_dist, use_cci, c
         bar_time = df.iloc[-1]['timestamp']
         debug_txt = f"ระยะห่าง EMA: {ema_distance:.2f}% | CCI ล่าสุด: {live_cci:.2f}"
         
-        # อัปเดตประวัติการเทรดพร้อมรอบการดึงกราฟหลัก (ทุกๆ 10 วิ) ป้องกันสแปม API
         update_trades_cache_safe()
         
         st.session_state.cached_df = df
@@ -253,7 +254,7 @@ def fire_execution_order(side, entry_price, margin_size, leverage, tp_p, sl_p, i
         except: pass
 
         update_trades_cache_safe()
-        tg_msg = f"{emoji_side} *[Whale Hunter V8.7]* ยิงสำเร็จ!\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
+        tg_msg = f"{emoji_side} *[Whale Hunter V8.8]* ยิงสำเร็จ!\n• *โหมด:* {mode_text}\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
         st.success(f"เปิดออเดอร์ {side} เรียบร้อยแล้ว!")
     except Exception as e:
@@ -288,17 +289,16 @@ def close_all_positions():
         st.error(f"❌ เคลียร์พอร์ตล้มเหลว: {e}")
 
 # --- 4. STREAMLIT PANEL UI ---
-bot_status_indicator = "● LIVE WEB-TRADING ACTIVE (MUTLI-TICKET MODE)" if st.session_state.bot_active else "○ SYSTEM DISABLED"
+bot_status_indicator = "• LIVE WEB-TRADING ACTIVE (MUTLI-TICKET MODE)" if st.session_state.bot_active else "○ SYSTEM DISABLED"
 bot_status_color = "#00e676" if st.session_state.bot_active else "#ff1744"
 
 st.markdown(f"""
 <div style="background-color: #12161f; border: 1px solid #1e2533; padding: 10px 20px; border-radius: 6px; margin-bottom: 20px;">
-    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V8.7 - Multi-Ticket 24H Engine</span>
+    <span style="font-size: 20px; font-weight: bold; color: white;">WHALE HUNTER V8.8 - Multi-Ticket Fixed</span>
     <span style="float: right; color: {bot_status_color}; font-weight: bold; padding-top: 5px;">{bot_status_indicator}</span>
 </div>
 """, unsafe_allow_html=True)
 
-# โหลดข้อมูลตั๋วเริ่มต้นครั้งแรก
 if 'first_init' not in st.session_state:
     update_trades_cache_safe()
     st.session_state.first_init = True
@@ -321,7 +321,7 @@ with col_left:
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>EMA FILTER CONFIG</h4>", unsafe_allow_html=True)
         u_ema = st.checkbox("เปิดใช้งาน EMA Filter", value=True)
-        e_len = st.number_input("EMA Length", value=20, step=10)
+        e_len = st.number_input("EMA Length", value=20, step=10) # <-- แก้ไขกลับมาเป็นค่าเริ่มต้น 20 ให้พี่แล้วครับ
         e_dist = st.number_input("Reverse Distance From EMA (%)", value=1.5, step=0.1)
         
         st.markdown("<h4 style='color:#90a4ae; font-size:12px; margin-top:10px;'>CCI REVERSAL FILTER</h4>", unsafe_allow_html=True)
@@ -369,11 +369,10 @@ with col_left:
             close_all_positions()
             st.rerun()
 
-# 🎯 รันคำนวณสัญญาณและดึงข้อมูลแยกไม้รายตั๋วหลังตั้งอินพุตเสร็จ
 signal, live_price, bar_time, log_debug, current_cci_val = get_market_and_signal_safe(u_ema, e_len, e_dist, u_cci, c_len, c_ob, c_os)
 virtual_orders_list, active_l, active_s = process_virtual_orders_from_cache(live_price, current_mgn_active, lev, max_t)
 
-# --- ระบบออโต้สแกนยิงคำสั่งในหน้าเว็บ ---
+# --- AUTO EXECUTION ---
 if st.session_state.bot_active and signal in ["LONG", "SHORT"]:
     if 'last_order_time' not in st.session_state: st.session_state.last_order_time = 0
     current_time_sec = time.time()
@@ -398,7 +397,7 @@ with col_center:
     else:
         st.info("🔄 กำลังโหลดข้อมูลแท่งเทียนเริ่มต้นอย่างปลอดภัย...")
 
-    # --- ตารางคำนวณแยกไม้กลับมาแล้วตามใจสั่งครับพี่ ---
+    # --- Virtual Positions List ---
     st.markdown("<h3>Virtual Positions (ระบบแยกตั๋วรายไม้)</h3>", unsafe_allow_html=True)
     
     if virtual_orders_list:
@@ -461,6 +460,5 @@ with col_right:
         st.caption(f"• สถานะสัญญาณ: `{signal}`")
         st.caption(f"• บันทึกระบบ: `{log_debug}`")
 
-# หน่วงเวลา 10 วินาทีเพื่อเซฟท่อ API ไม่ให้พังและเสถียรที่สุด
 time.sleep(10)
 st.rerun()
