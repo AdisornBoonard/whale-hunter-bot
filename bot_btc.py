@@ -137,6 +137,9 @@ def fire_execution_order(side, entry_price, margin_size):
         tg_msg = f"{emoji} *[Whale Hunter BTC - Pure 5m]* ยิงสำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.2f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
     except Exception as e: print(f"Error BTC order: {e}")
+    error_msg = f"⚠️ *[Whale Hunter BTC - ยิงพลาด!]*\n• เกิดข้อผิดพลาดในการส่งคำสั่ง\n• *ฝั่ง:* {side}\n• *สาเหตุ:* `{str(e)}`"
+    send_telegram_message(error_msg)
+        
 
 # --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
