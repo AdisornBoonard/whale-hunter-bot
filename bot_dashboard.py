@@ -48,7 +48,6 @@ def process_virtual_orders(df_trades, symbol):
             size = float(pos.get('contracts', 0)) or float(pos.get('size', 0))
             if size != 0:
                 pos_symbol = pos.get('symbol', '').upper()
-                # ตรวจสอบสัญลักษณ์ให้ตรงกับหน้าจอที่เลือก
                 if symbol == 'NCCOGOLD2USD/USDT:USDT' and ('GOLD' in pos_symbol or 'NCCO' in pos_symbol):
                     side = pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT')
                     active_positions[side] = abs(size)
@@ -88,7 +87,41 @@ def close_specific_virtual_order(symbol, side, amt, label):
         st.rerun()
     except Exception as e: st.error(f"ปิดตั๋วไม่สำเร็จ: {e}")
 
-# --- NAVIGATION SIDEBAR (หน้า Home สำหรับคลิกเลือกพอร์ต) ---
+def fire_manual_order(symbol, side, entry_price, margin, lev, tp_pct, sl_pct):
+    try:
+        contract_amount = round((margin * lev) / entry_price, 4)
+        tp_factor = tp_pct / 100
+        sl_factor = sl_pct / 100
+        
+        # ปรับทศนิยมราคาตามประเภทสินทรัพย์
+        decimal_place = 1 if 'BTC' in symbol else 2
+        
+        if side == "LONG":
+            tp_price = round(entry_price * (1 + tp_factor), decimal_place)
+            sl_price = round(entry_price * (1 - sl_factor), decimal_place)
+            order_side = 'buy'
+        else:
+            tp_price = round(entry_price * (1 - tp_factor), decimal_place)
+            sl_price = round(entry_price * (1 + sl_factor), decimal_place)
+            order_side = 'sell'
+
+        # ส่งคำสั่ง Market Open Position ไปกระดานเทรด
+        exchange.create_order(symbol=symbol, type='market', side=order_side, amount=contract_amount, params={'positionSide': side})
+        
+        # ตั้งเงื่อนไขป้องกัน TP/SL รายไม้พ่วงเข้าไปในระบบกระดานเทรดทันที
+        try:
+            tp_sl_side = 'sell' if side == 'LONG' else 'buy'
+            exchange.create_order(symbol=symbol, type='TAKE_PROFIT_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': tp_price, 'workingType': 'MARK_PRICE'})
+            exchange.create_order(symbol=symbol, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
+        except: pass
+
+        st.sidebar.success(f"🚀 ยิงมือสำเร็จ! เปิดฝั่ง {side} ขนาด {contract_amount}")
+        time.sleep(1.5)
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"ยิงออเดอร์มือล้มเหลว: {e}")
+
+# --- NAVIGATION SIDEBAR (แถบเมนูข้างจอ) ---
 st.sidebar.title("📌 เมนูควบคุมระบบ")
 page = st.sidebar.radio("เลือกหน้าแดชบอร์ดที่ต้องการดู:", ["🏠 หน้าแรก (Overview)", "🏆 พอร์ตทองคำ / NCCO", "🟠 พอร์ต BTC Futures"])
 
@@ -100,13 +133,61 @@ try:
 except:
     total_cap, avail_cap = 0.0, 0.0
 
+st.sidebar.markdown("---")
+# 🛠️ แผงควบคุมกดเข้าออเดอร์ด้วยมือ (MANUAL ENTRY CONTROL PANEL)
+st.sidebar.subheader("🕹️ แผงสั่งยิงออเดอร์ด้วยมือ")
+manual_asset = st.sidebar.selectbox("เลือกเหรียญที่จะกดมือ:", ["GOLD/NCCO", "BTC/USDT"])
+
+# เซตค่าเริ่มต้นของสัญลักษณ์และเปอร์เซ็นต์ตามที่พี่เคยตั้งไว้ในรูป
+if manual_asset == "GOLD/NCCO":
+    m_symbol = 'NCCOGOLD2USD/USDT:USDT'
+    default_lev = 250
+    default_mgn = 0.02
+    default_tp = 0.50
+    default_sl = 0.30
+else:
+    m_symbol = 'BTC/USDT'
+    default_lev = 150
+    default_mgn = 1.0
+    default_tp = 2.0
+    default_sl = 2.5
+
+try:
+    m_ticker = exchange.fetch_ticker(m_symbol)
+    m_live_price = float(m_ticker['last'])
+except:
+    m_live_price = 0.0
+
+# ช่องรับค่าพารามิเตอร์การเปิดไม้ด้วยมือ
+m_mgn = st.sidebar.number_input("ระบุขนาดเงินทุน (Margin $)", min_value=0.01, value=default_mgn, step=0.01, format="%.2f")
+m_lev = st.sidebar.number_input("ระบุค่า Leverage (X)", min_value=1, max_value=250, value=default_lev, step=1)
+m_tp = st.sidebar.number_input("ระบุเป้าหมายกําไร TP (%)", min_value=0.05, value=default_tp, step=0.05, format="%.2f")
+m_sl = st.sidebar.number_input("ระบุจุดตัดขาดทุน SL (%)", min_value=0.05, value=default_sl, step=0.05, format="%.2f")
+
+# คำนวณขนาดสัญญากลางก่อนยิงจริง
+if m_live_price > 0:
+    calc_amt = round((m_mgn * m_lev) / m_live_price, 4)
+    st.sidebar.caption(f"📊 ขนาดสัญญาที่จะส่งออก: **{calc_amt}**")
+else:
+    st.sidebar.caption("⚠️ ไม่สามารถดึงราคาตลาดเพื่อคำนวณสัญญาได้")
+
+col_btn1, col_btn2 = st.sidebar.columns(2)
+if col_btn1.button("🟢 เปิดไม้ LONG", use_container_width=True):
+    if m_live_price > 0:
+        fire_manual_order(m_symbol, "LONG", m_live_price, m_mgn, m_lev, m_tp, m_sl)
+
+if col_btn2.button("🔴 เปิดไม้ SHORT", use_container_width=True):
+    if m_live_price > 0:
+        fire_manual_order(m_symbol, "SHORT", m_live_price, m_mgn, m_lev, m_tp, m_sl)
+
+
 # ----------------------------------------------------
 # 1. หน้าแรก (Overview Home Page)
 # ----------------------------------------------------
 if page == "🏠 หน้าแรก (Overview)":
     st.title("🐳 Whale Hunter V8.9 - Hybrid Dashboard")
     st.subheader("ยินดีต้อนรับสู่ระบบควบคุมพอร์ตแบบไฮบริด")
-    st.write("พี่สามารถคลิกเลือกเมนูด้านซ้ายเพื่อเข้าไปดูไม้แยกและกดปิดตั๋วรายไม้เดี่ยวได้ทันทีครับ")
+    st.write("พี่สามารถเลือกเหรียญเพื่อสั่งเปิดไม้มือด่วนได้ที่แถบเมนูด้านซ้าย และคลิกสลับหน้าจอเพื่อดูสถานะ Virtual Positions คราบบบ")
     
     st.markdown("---")
     col1, col2 = st.columns(2)
