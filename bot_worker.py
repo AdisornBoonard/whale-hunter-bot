@@ -6,6 +6,8 @@ import requests
 import numpy as np  
 import pandas as pd
 from dotenv import load_dotenv
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -26,7 +28,6 @@ TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
-# --- ตั้งค่ากลยุทธ์ตามเดิมของพี่ ---
 BASE_MARGIN = 0.02  
 DAILY_ADD = 0.06
 LEVERAGE = 250
@@ -43,18 +44,21 @@ CCI_LENGTH = 100
 CCI_OB = 40.0
 CCI_OS = -150.0
 
-# ไฟล์สำหรับบันทึกเวลาบอทสตาร์ท และเวลาส่ง Heartbeat ล่าสุด (เนื่องจากบอทไม่ได้เปิดค้างในแรม ต้องเซฟลงไฟล์ดิสก์แทน)
-START_TIME_FILE = "bot_start_time.txt"
-HEARTBEAT_FILE = "last_heartbeat.txt"
+# --- สร้าง Web Server จำลองหลอก Render แผนฟรี ---
+class SimpleHTTPServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Whale Hunter V8.9 is running online!")
 
-def get_persisted_start_time():
-    if os.path.exists(START_TIME_FILE):
-        try:
-            with open(START_TIME_FILE, "r") as f: return float(f.read().strip())
-        except: pass
-    now = time.time()
-    with open(START_TIME_FILE, "w") as f: f.write(str(now))
-    return now
+    def log_message(self, format, *args):
+        return  # ปิด log หน้าเว็บเพื่อไม่ให้รกหน้าจอ
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPServer)
+    server.serve_forever()
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -112,7 +116,7 @@ def count_active_tickets(df_trades):
 
         if active_positions and not df_trades.empty:
             for side, current_actual_size in active_positions.items():
-                target_trade_side = 'buy' if side == 'LONG' else 'sell'
+                target_trade_side = 'buy' if size > 0 else 'sell'
                 df_filtered = df_trades[(df_trades['side'] == side) & (df_trades['trade_side'] == target_trade_side)]
                 accumulated_size = 0.0
                 for _, row in df_filtered.iterrows():
@@ -150,104 +154,107 @@ def fire_execution_order(side, entry_price, margin_size):
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = f"{emoji} *[Whale Hunter V8.9 - Cron]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
+        tg_msg = f"{emoji} *[Whale Hunter V8.9]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
     except Exception as e: print(f"Error executing order: {e}")
 
-# --- MAIN EXECUTION (RUN ONCE PER MINUTE) ---
+# --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
-    try:
-        bot_start_time = get_persisted_start_time()
-        days_passed = math.floor((time.time() - bot_start_time) / (24 * 60 * 60))
-        current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
+    # 1. สั่งรัน Web Server หลอกระบบในอีก Thread หนึ่ง
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
 
-        # ดึงราคาฟีดคำนวณสัญญาณรอบปัจจุบัน
-        bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
-        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        df['mfi'] = calculate_mfi(df, length=MFI_LENGTH)
-        df['ema'] = df['close'].ewm(span=EMA_LENGTH, adjust=False).mean() 
-        df['v_ma'] = df['volume'].rolling(window=20).mean()
-        df['cci'] = calculate_cci(df, length=CCI_LENGTH)
-        
-        idx = len(df) - 2
-        c_close = df.iloc[idx]['close']
-        c_high  = df.iloc[idx]['high']
-        c_low   = df.iloc[idx]['low']
-        c_vol   = df.iloc[idx]['volume']
-        c_mfi   = df.iloc[idx]['mfi']
-        c_vma   = df.iloc[idx]['v_ma']
-        c_ema   = df.iloc[idx]['ema']
-        c_cci   = df.iloc[idx]['cci']
-        
-        p_high  = df.iloc[idx-1]['high']
-        p_low   = df.iloc[idx-1]['low']
-        p_mfi   = df.iloc[idx-1]['mfi']
-        
-        bull_div = (c_low < p_low) and (c_mfi > p_mfi) and (c_mfi < 40)
-        bear_div = (c_high > p_high) and (c_mfi < p_mfi) and (c_mfi > 60)
-        is_w = c_vol > (c_vma * VOL_MULTIPLIER)
-        
-        long_base  = bull_div and is_w
-        short_base = bear_div and is_w
-        
-        ema_bull = c_close > c_ema
-        ema_bear = c_close < c_ema
-        ema_distance = abs(c_close - c_ema) / c_ema * 100
-        far_from_ema = ema_distance >= EMA_REVERSE_DIST
-        
-        signal = "HOLD"
-        if not USE_EMA:
-            if long_base: signal = "LONG"
-            if short_base: signal = "SHORT"
-        else:
-            if long_base: signal = "SHORT" if (far_from_ema and ema_bull) else "LONG"
-            if short_base: signal = "SHORT" if not (far_from_ema and not ema_bear) else "LONG"
+    print("🟢 Whale Hunter V8.9 Web Service is Active...")
+    send_telegram_message("🟢 *[Whale Hunter V8.9]* บอทเริ่มทำงานในโหมด Web Service ฟรีเรียบร้อยคราบบบ!")
+
+    bot_start_time = time.time()
+    last_heartbeat_time = 0.0
+
+    # 2. ลูปตรวจสอบกราฟและทำงานทุกๆ 60 วินาที (1 นาที ตรงตามแท่งเทียน)
+    while True:
+        try:
+            days_passed = math.floor((time.time() - bot_start_time) / (24 * 60 * 60))
+            current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
+
+            bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+            df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            df['mfi'] = calculate_mfi(df, length=MFI_LENGTH)
+            df['ema'] = df['close'].ewm(span=EMA_LENGTH, adjust=False).mean() 
+            df['v_ma'] = df['volume'].rolling(window=20).mean()
+            df['cci'] = calculate_cci(df, length=CCI_LENGTH)
+            
+            idx = len(df) - 2
+            c_close = df.iloc[idx]['close']
+            c_high  = df.iloc[idx]['high']
+            c_low   = df.iloc[idx]['low']
+            c_vol   = df.iloc[idx]['volume']
+            c_mfi   = df.iloc[idx]['mfi']
+            c_vma   = df.iloc[idx]['v_ma']
+            c_ema   = df.iloc[idx]['ema']
+            c_cci   = df.iloc[idx]['cci']
+            
+            p_high  = df.iloc[idx-1]['high']
+            p_low   = df.iloc[idx-1]['low']
+            p_mfi   = df.iloc[idx-1]['mfi']
+            
+            bull_div = (c_low < p_low) and (c_mfi > p_mfi) and (c_mfi < 40)
+            bear_div = (c_high > p_high) and (c_mfi < p_mfi) and (c_mfi > 60)
+            is_w = c_vol > (c_vma * VOL_MULTIPLIER)
+            
+            long_base  = bull_div and is_w
+            short_base = bear_div and is_w
+            
+            ema_bull = c_close > c_ema
+            ema_bear = c_close < c_ema
+            ema_distance = abs(c_close - c_ema) / c_ema * 100
+            far_from_ema = ema_distance >= EMA_REVERSE_DIST
+            
+            signal = "HOLD"
+            if not USE_EMA:
+                if long_base: signal = "LONG"
+                if short_base: signal = "SHORT"
+            else:
+                if long_base: signal = "SHORT" if (far_from_ema and ema_bull) else "LONG"
+                if short_base: signal = "SHORT" if not (far_from_ema and not ema_bear) else "LONG"
+                        
+            if USE_CCI and signal in ["LONG", "SHORT"]:
+                if c_cci > CCI_OB: signal = "SHORT"
+                elif c_cci < CCI_OS: signal = "LONG"
                     
-        if USE_CCI and signal in ["LONG", "SHORT"]:
-            if c_cci > CCI_OB: signal = "SHORT"
-            elif c_cci < CCI_OS: signal = "LONG"
+            live_price = df.iloc[-1]['close']
+
+            df_trades = fetch_trades_safe()
+            active_l, active_s = count_active_tickets(df_trades)
+
+            if signal == "LONG" and active_l < MAX_TICKETS:
+                fire_execution_order("LONG", live_price, current_mgn_active)
+            elif signal == "SHORT" and active_s < MAX_TICKETS:
+                fire_execution_order("SHORT", live_price, current_mgn_active)
+
+            # --- Heartbeat ประจำชั่วโมง ---
+            current_time = time.time()
+            if current_time - last_heartbeat_time >= 3600:
+                try:
+                    bal = exchange.fetch_balance()
+                    total_cap = round(float(bal.get('USDT', {}).get('total', 0.0)), 2)
+                    avail_cap = round(float(bal.get('USDT', {}).get('free', 0.0)), 2)
+                except: total_cap, avail_cap = 0.0, 0.0
                 
-        live_price = df.iloc[-1]['close']
+                heartbeat_msg = (
+                    f"🤖 *[Whale Hunter V8.9 - รายงานตัว]*\n"
+                    f"• *สถานะบอท:* 🟢 ออนไลน์ปกติ (Web Service)\n"
+                    f"• *ราคาปัจจุบัน:* ${live_price}\n"
+                    f"• *ตั๋วค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
+                    f"• *ทุนคงเหลือ:* ${avail_cap} / สุทธิ ${total_cap}\n"
+                    f"• *Margin ไม้ถัดไป:* ${current_mgn_active:.4f}"
+                )
+                send_telegram_message(heartbeat_msg)
+                last_heartbeat_time = current_time
 
-        # เช็กจำนวนตั๋วค้างกระดานในวินาทีนี้
-        df_trades = fetch_trades_safe()
-        active_l, active_s = count_active_tickets(df_trades)
+            print(f"🔄 Loop Check Finished. Signal: {signal} | Price: {live_price}")
 
-        # ลอจิกยิงออเดอร์ทันที (ถอด Cooldown ออกได้เลยเพราะ Cron เป็นคนหน่วงเวลาให้ 1 นาทีอยู่แล้ว)
-        if signal == "LONG" and active_l < MAX_TICKETS:
-            fire_execution_order("LONG", live_price, current_mgn_active)
-        elif signal == "SHORT" and active_s < MAX_TICKETS:
-            fire_execution_order("SHORT", live_price, current_mgn_active)
-
-        # --- ลอจิกส่ง HEARTBEAT ประจำชั่วโมง (3600 วิ) ---
-        now_time = time.time()
-        last_hb = 0.0
-        if os.path.exists(HEARTBEAT_FILE):
-            try:
-                with open(HEARTBEAT_FILE, "r") as f: last_hb = float(f.read().strip())
-            except: pass
+        except Exception as ex:
+            print(f"Loop Error: {ex}")
             
-        if (now_time - last_hb) >= 3600:
-            try:
-                bal = exchange.fetch_balance()
-                total_cap = round(float(bal.get('USDT', {}).get('total', 0.0)), 2)
-                avail_cap = round(float(bal.get('USDT', {}).get('free', 0.0)), 2)
-            except: total_cap, avail_cap = 0.0, 0.0
-            
-            heartbeat_msg = (
-                f"🤖 *[Whale Hunter V8.9 - รายงานตัวประจำชั่วโมง]*\n"
-                f"• *สถานะบอท:* 🟢 ทำงานปกติ (โหมดฟรี Cron Jobs)\n"
-                f"• *ราคาปัจจุบัน:* ${live_price}\n"
-                f"• *จำนวนไม้ค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
-                f"• *ทุนคงเหลือ:* ${avail_cap} / สุทธิ ${total_cap}\n"
-                f"• *Margin ปัจจุบัน:* ${current_mgn_active:.4f}\n"
-                f"📟 _เช็กกราฟอย่างแม่นยำทุกนาที ปลอดภัย 100% ครับ_"
-            )
-            send_telegram_message(heartbeat_msg)
-            with open(HEARTBEAT_FILE, "w") as f: f.write(str(now_time))
-
-        print(f"🔄 Execution Finished. Signal: {signal} | Price: {live_price}")
-
-    except Exception as ex:
-        print(f"Error: {ex}")
+        time.sleep(60) # หน่วงเวลาลูปละ 1 นาที
