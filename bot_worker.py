@@ -26,7 +26,7 @@ TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
-# --- ตั้งค่ากลยุทธ์ตามโค้ดล่าสุดของพี่ ---
+# --- ตั้งค่ากลยุทธ์ตามเดิมของพี่ ---
 BASE_MARGIN = 0.02  
 DAILY_ADD = 0.06
 LEVERAGE = 250
@@ -34,7 +34,6 @@ MAX_TICKETS = 10
 TP_PERCENT = 0.50
 SL_PERCENT = 0.30
 
-# ตั้งค่าอินดิเคเตอร์ฟิลเตอร์
 USE_EMA = True
 EMA_LENGTH = 10
 EMA_REVERSE_DIST = 1.5
@@ -44,10 +43,18 @@ CCI_LENGTH = 100
 CCI_OB = 40.0
 CCI_OS = -150.0
 
-# ตัวแปรควบคุมระบบภายในคอร์
-bot_start_time = time.time()
-last_order_time = 0
-last_heartbeat_time = 0
+# ไฟล์สำหรับบันทึกเวลาบอทสตาร์ท และเวลาส่ง Heartbeat ล่าสุด (เนื่องจากบอทไม่ได้เปิดค้างในแรม ต้องเซฟลงไฟล์ดิสก์แทน)
+START_TIME_FILE = "bot_start_time.txt"
+HEARTBEAT_FILE = "last_heartbeat.txt"
+
+def get_persisted_start_time():
+    if os.path.exists(START_TIME_FILE):
+        try:
+            with open(START_TIME_FILE, "r") as f: return float(f.read().strip())
+        except: pass
+    now = time.time()
+    with open(START_TIME_FILE, "w") as f: f.write(str(now))
+    return now
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -88,8 +95,7 @@ def fetch_trades_safe():
         if not df.empty:
             df = df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
         return df
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 def count_active_tickets(df_trades):
     l_count, s_count = 0, 0
@@ -144,22 +150,18 @@ def fire_execution_order(side, entry_price, margin_size):
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = f"{emoji} *[Whale Hunter V8.9 - Worker]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
+        tg_msg = f"{emoji} *[Whale Hunter V8.9 - Cron]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
-    except Exception as e:
-        print(f"Error executing order: {e}")
+    except Exception as e: print(f"Error executing order: {e}")
 
-# --- START ENGINE LOOP ---
-print("🟢 Whale Hunter V8.9 Background Worker is Active...")
-send_telegram_message("🟢 *[Whale Hunter V8.9]* บอทหลักเริ่มทำงานเงียบหลังบ้านรัน 24 ชั่วโมงเรียบร้อย!")
-
-while True:
+# --- MAIN EXECUTION (RUN ONCE PER MINUTE) ---
+if __name__ == "__main__":
     try:
-        # 1. คำนวณขยับมาร์จิ้นรายวัน
+        bot_start_time = get_persisted_start_time()
         days_passed = math.floor((time.time() - bot_start_time) / (24 * 60 * 60))
         current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
 
-        # 2. ดึงราคากราฟคำนวณสัญญาณตามสูตรล่าสุดของพี่
+        # ดึงราคาฟีดคำนวณสัญญาณรอบปัจจุบัน
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
@@ -199,10 +201,8 @@ while True:
             if long_base: signal = "LONG"
             if short_base: signal = "SHORT"
         else:
-            if long_base:
-                signal = "SHORT" if (far_from_ema and ema_bull) else "LONG"
-            if short_base:
-                signal = "SHORT" if not (far_from_ema and not ema_bear) else "LONG"
+            if long_base: signal = "SHORT" if (far_from_ema and ema_bull) else "LONG"
+            if short_base: signal = "SHORT" if not (far_from_ema and not ema_bear) else "LONG"
                     
         if USE_CCI and signal in ["LONG", "SHORT"]:
             if c_cci > CCI_OB: signal = "SHORT"
@@ -210,22 +210,25 @@ while True:
                 
         live_price = df.iloc[-1]['close']
 
-        # 3. ตรวจสอบจำนวนไม้ย่อยค้างกระดาน
+        # เช็กจำนวนตั๋วค้างกระดานในวินาทีนี้
         df_trades = fetch_trades_safe()
         active_l, active_s = count_active_tickets(df_trades)
 
-        # 4. ลอจิกส่งออเดอร์ออโต้ (Cooldown 60 วิ)
-        current_time_sec = time.time()
-        if signal in ["LONG", "SHORT"] and (current_time_sec - last_order_time) > 60:
-            if signal == "LONG" and active_l < MAX_TICKETS:
-                fire_execution_order("LONG", live_price, current_mgn_active)
-                last_order_time = current_time_sec
-            elif signal == "SHORT" and active_s < MAX_TICKETS:
-                fire_execution_order("SHORT", live_price, current_mgn_active)
-                last_order_time = current_time_sec
+        # ลอจิกยิงออเดอร์ทันที (ถอด Cooldown ออกได้เลยเพราะ Cron เป็นคนหน่วงเวลาให้ 1 นาทีอยู่แล้ว)
+        if signal == "LONG" and active_l < MAX_TICKETS:
+            fire_execution_order("LONG", live_price, current_mgn_active)
+        elif signal == "SHORT" and active_s < MAX_TICKETS:
+            fire_execution_order("SHORT", live_price, current_mgn_active)
 
-        # 5. สแตมป์เวลาส่งรายงานตัวประจำชั่วโมง (3600 วิ)
-        if (current_time_sec - last_heartbeat_time) >= 3600:
+        # --- ลอจิกส่ง HEARTBEAT ประจำชั่วโมง (3600 วิ) ---
+        now_time = time.time()
+        last_hb = 0.0
+        if os.path.exists(HEARTBEAT_FILE):
+            try:
+                with open(HEARTBEAT_FILE, "r") as f: last_hb = float(f.read().strip())
+            except: pass
+            
+        if (now_time - last_hb) >= 3600:
             try:
                 bal = exchange.fetch_balance()
                 total_cap = round(float(bal.get('USDT', {}).get('total', 0.0)), 2)
@@ -234,17 +237,17 @@ while True:
             
             heartbeat_msg = (
                 f"🤖 *[Whale Hunter V8.9 - รายงานตัวประจำชั่วโมง]*\n"
-                f"• *สถานะบอท:* 🟢 บอทรันปกติ (รันเงียบคลาวด์)\n"
+                f"• *สถานะบอท:* 🟢 ทำงานปกติ (โหมดฟรี Cron Jobs)\n"
                 f"• *ราคาปัจจุบัน:* ${live_price}\n"
                 f"• *จำนวนไม้ค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
                 f"• *ทุนคงเหลือ:* ${avail_cap} / สุทธิ ${total_cap}\n"
                 f"• *Margin ปัจจุบัน:* ${current_mgn_active:.4f}\n"
-                f"📟 _บอทยังทำงานอยู่ดี ระบบคลาวด์เปิดต่อเนื่องครับ_"
+                f"📟 _เช็กกราฟอย่างแม่นยำทุกนาที ปลอดภัย 100% ครับ_"
             )
             send_telegram_message(heartbeat_msg)
-            last_heartbeat_time = current_time_sec
+            with open(HEARTBEAT_FILE, "w") as f: f.write(str(now_time))
+
+        print(f"🔄 Execution Finished. Signal: {signal} | Price: {live_price}")
 
     except Exception as ex:
-        print(f"Error in running engine loop: {ex}")
-        
-    time.sleep(10)
+        print(f"Error: {ex}")
