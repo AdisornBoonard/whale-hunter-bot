@@ -23,7 +23,7 @@ exchange = ccxt.bingx({
     'options': {'defaultType': 'swap'} 
 })
 
-SYMBOL = 'BTC/USDT'
+SYMBOL = 'BTC/USDT:USDT'
 TIMEFRAME = '5m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
