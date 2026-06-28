@@ -61,7 +61,7 @@ def process_virtual_orders(df_trades, symbol):
                 if symbol == 'NCCOGOLD2USD/USDT:USDT' and ('GOLD' in pos_symbol or 'NCCO' in pos_symbol):
                     side = pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT')
                     active_positions[side] = abs(size)
-                elif symbol == 'BTC/USDT' and pos_symbol == 'BTC/USDT':
+                elif symbol == 'BTC/USDT:USDT' and pos_symbol == 'BTC/USDT:USDT':
                     side = pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT')
                     active_positions[side] = abs(size)
 
@@ -150,7 +150,7 @@ if manual_asset == "GOLD/NCCO":
     default_tp = 0.50
     default_sl = 0.30
 else:
-    m_symbol = 'BTC/USDT'
+    m_symbol = 'BTC/USDT:USDT'
     default_lev = 150
     default_mgn = 0.5
     default_tp = 2.0
