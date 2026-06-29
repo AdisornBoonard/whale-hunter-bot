@@ -8,6 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime  # <-- เพิ่มเข้ามาเพื่อจัดการวันที่แบบเสถีย
 
 # --- CONFIGURATION FROM USER DASHBOARD ---
 load_dotenv()
@@ -28,12 +29,22 @@ TIMEFRAME = '5m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
-BASE_MARGIN = 0.5       # Margin ไม้แรก $0.5
-DAILY_ADD = 1.5         # เพิ่ม Margin วันละ $1.5
-LEVERAGE = 150          # Leverage 150x
-MAX_TICKETS = 3         # เปิดสูงสุดต่อฝั่ง 3 ไม้
-TP_PERCENT = 2.0        # TP 2%
-SL_PERCENT = 2.5        # SL 2.5%
+# --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
+BOT_START_DATE = "2026-06-29"   # <-- [ตั้งค่าที่นี่] รูปแบบ ปปปป-ดด-วว เพื่อให้ทบทุนได้ถูกต้องแม่นยำแม้บอทรีสตาร์ท
+BASE_MARGIN = 0.5               # Margin ไม้แรก $0.5
+DAILY_ADD = 1.5                 # เพิ่ม Margin วันละ $1.5
+LEVERAGE = 150                  # Leverage 150x
+MAX_TICKETS = 3                 # เปิดสูงสุดต่อฝั่ง 3 ไม้
+TP_PERCENT = 2.0                # TP 2%
+SL_PERCENT = 2.5                # SL 2.5%
+
+#ฟังก์ชันตั้งค่า Leverage แนะนำให้รันตอนเริ่มระบบเพื่อล็อกฝั่ง Futures
+def init_exchange_settings():
+    try:
+        exchange.set_leverage(LEVERAGE, SYMBOL)
+        print(f"⚙️ Set Leverage to {LEVERAGE}x for {SYMBOL} successfully.")
+    except Exception as e:
+        print(f"⚠️ Warning setting leverage: {e} (ระบบจะรันต่อด้วยค่าตั้งต้นบนเว็บ)")
 
 class SimpleHTTPServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -96,6 +107,7 @@ def count_active_tickets(df_trades):
 
         if active_positions and not df_trades.empty:
             for side, current_actual_size in active_positions.items():
+                # แก้ไขบั๊ก Logic เดิม: คัดกรองฝั่งออเดอร์ให้ตรงกับตัวแปร side ของลูปปัจจุบัน
                 target_trade_side = 'buy' if side == 'LONG' else 'sell'
                 df_filtered = df_trades[(df_trades['side'] == side) & (df_trades['trade_side'] == target_trade_side)]
                 accumulated_size = 0.0
@@ -112,7 +124,11 @@ def count_active_tickets(df_trades):
 
 def fire_execution_order(side, entry_price, margin_size):
     try:
+        # คำนวณจำนวนสัญญาสำหรับ BTC (ปัดทศนิยม 4 ตำแหน่ง เหมาะสำหรับ Lot ขั้นต่ำ 0.0001 BTC บน BingX Futures)
         contract_amount = round((margin_size * LEVERAGE) / entry_price, 4)
+        if contract_amount < 0.0001:
+            contract_amount = 0.0001 # ป้องกันกรณี Margin น้อยเกินไปจนส่งออเดอร์ไม่ได้
+            
         tp_factor = TP_PERCENT / 100
         sl_factor = SL_PERCENT / 100
         
@@ -127,8 +143,10 @@ def fire_execution_order(side, entry_price, margin_size):
             order_side = 'sell'
             emoji = "🟠💥"
 
+        # ส่งคำสั่ง Market Order หลักเข้าสู่ระบบ Futures แบบระบุ Position Side
         exchange.create_order(symbol=SYMBOL, type='market', side=order_side, amount=contract_amount, params={'positionSide': side})
         try:
+            # ส่งคำสั่งผูกเงื่อนไข TP/SL ครบเซ็ต
             tp_sl_side = 'sell' if side == 'LONG' else 'buy'
             exchange.create_order(symbol=SYMBOL, type='TAKE_PROFIT_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': tp_price, 'workingType': 'MARK_PRICE'})
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
@@ -136,25 +154,33 @@ def fire_execution_order(side, entry_price, margin_size):
 
         tg_msg = f"{emoji} *[Whale Hunter BTC - Pure 5m]* ยิงสำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.2f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
-    except Exception as e: print(f"Error BTC order: {e}")
-    error_msg = f"⚠️ *[Whale Hunter BTC - ยิงพลาด!]*\n• เกิดข้อผิดพลาดในการส่งคำสั่ง\n• *ฝั่ง:* {side}\n• *สาเหตุ:* `{str(e)}`"
-    send_telegram_message(error_msg)
+    except Exception as e: 
+        print(f"Error BTC order: {e}")
+        error_msg = f"⚠️ *[Whale Hunter BTC - ยิงพลาด!]*\n• เกิดข้อผิดพลาดในการส่งคำสั่ง\n• *ฝั่ง:* {side}\n• *สาเหตุ:* `{str(e)}`"
+        send_telegram_message(error_msg)
         
 
 # --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
+    
+    # รันการซิงค์ค่าระบบ Futures เบื้องต้น
+    init_exchange_settings()
 
     print("🟢 BTC Whale Hunter (Pure Mode) is Active...")
     send_telegram_message("🟠 *[Whale Hunter BTC]* เริ่มระบบเฝ้ากราฟแบบ Pure Divergence (No Filter) เรียบร้อยครับพี่!")
 
-    bot_start_time = time.time()
     last_heartbeat_time = 0.0
 
     while True:
         try:
-            days_passed = math.floor((time.time() - bot_start_time) / (24 * 60 * 60))
+            # คำนวณวันจาก String วันที่กำหนดไว้อย่างแม่นยำ
+            start_dt = datetime.strptime(BOT_START_DATE, "%Y-%m-%d")
+            now_dt = datetime.now()
+            days_passed = (now_dt - start_dt).days
+            if days_passed < 0: days_passed = 0
+            
             current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
 
             bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
@@ -168,7 +194,7 @@ if __name__ == "__main__":
             c_mfi, c_vma = df.iloc[idx]['mfi'], df.iloc[idx]['v_ma']
             p_high, p_low, p_mfi = df.iloc[idx-1]['high'], df.iloc[idx-1]['low'], df.iloc[idx-1]['mfi']
             
-            # เช็กเงื่อนไข Divergence เพียว ๆ + วอลลุ่ม
+            # เงื่อนไข Divergence + วอลลุ่ม
             bull_div = (c_low < p_low) and (c_mfi > p_mfi) and (c_mfi < 40)
             bear_div = (c_high > p_high) and (c_mfi < p_mfi) and (c_mfi > 60)
             is_w = c_vol > (c_vma * VOL_MULTIPLIER)
@@ -201,6 +227,7 @@ if __name__ == "__main__":
                 heartbeat_msg = (
                     f"🤖 *[Whale Hunter BTC - รายงานตัว]*\n"
                     f"• *สถานะบอท:* 🟢 ออนไลน์โหมด Pure (TF 5m)\n"
+                    f"• *วันที่คำนวณบอท:* รันมาแล้ว {days_passed} วัน\n"
                     f"• *ราคาปัจจุบัน:* ${live_price}\n"
                     f"• *ตั๋วค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
                     f"• *ทุนคงเหลือ:* ${avail_cap} / สุทธิ ${total_cap}\n"
@@ -209,9 +236,9 @@ if __name__ == "__main__":
                 send_telegram_message(heartbeat_msg)
                 last_heartbeat_time = current_time
 
-            print(f"🔄 BTC Loop Finished. Signal: {signal} | Price: {live_price}")
+            print(f"🔄 BTC Loop Finished. Signal: {signal} | Price: {live_price} | Day Count: {days_passed}")
 
         except Exception as ex:
             print(f"Loop Error: {ex}")
             
-        time.sleep(60) # เช็กสัญญาณอัปเดตต่อเนื่องรายนาที
+        time.sleep(60) # เช็กสัญญาณสอดคล้องต่อเนื่องรายนาที
