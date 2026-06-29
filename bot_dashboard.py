@@ -67,6 +67,7 @@ def process_virtual_orders(df_trades, symbol):
 
         if active_positions and not df_trades.empty:
             for side, current_actual_size in active_positions.items():
+                # ปรับแก้ Logic: ให้สัมพันธ์กับทิศทางออเดอร์ของฝั่ง (side) ที่กำลังวนลูปตรวจสอบอยู่
                 target_trade_side = 'buy' if side == 'LONG' else 'sell'
                 df_filtered = df_trades[(df_trades['side'] == side) & (df_trades['trade_side'] == target_trade_side)]
                 accumulated_size = 0.0
@@ -99,7 +100,11 @@ def close_specific_virtual_order(symbol, side, amt, label):
 
 def fire_manual_order(symbol, side, entry_price, margin, lev, tp_pct, sl_pct):
     try:
+        # ตรวจเช็คขั้นต่ำของปริมาณสัญญาบิตคอยน์
         contract_amount = round((margin * lev) / entry_price, 4)
+        if 'BTC' in symbol and contract_amount < 0.0001:
+            contract_amount = 0.0001
+            
         tp_factor = tp_pct / 100
         sl_factor = sl_pct / 100
         
@@ -113,6 +118,10 @@ def fire_manual_order(symbol, side, entry_price, margin, lev, tp_pct, sl_pct):
             tp_price = round(entry_price * (1 - tp_factor), decimal_place)
             sl_price = round(entry_price * (1 + sl_factor), decimal_place)
             order_side = 'sell'
+
+        # ล็อกเซ็ต Leverage ให้ชัวร์ก่อนส่งไม้
+        try: exchange.set_leverage(lev, symbol)
+        except: pass
 
         exchange.create_order(symbol=symbol, type='market', side=order_side, amount=contract_amount, params={'positionSide': side})
         try:
@@ -150,7 +159,7 @@ if manual_asset == "GOLD/NCCO":
     default_tp = 0.50
     default_sl = 0.30
 else:
-    m_symbol = 'BTC/USDT:USDT'
+    m_symbol = 'BTC/USDT:USDT'  # แก้ไขสัญลักษณ์คู่หลักให้ถูกต้องตรงกัน
     default_lev = 150
     default_mgn = 0.5
     default_tp = 2.0
@@ -169,6 +178,7 @@ m_sl = st.sidebar.number_input("ตัดขาดทุน SL (%)", min_value=0
 
 if m_live_price > 0:
     calc_amt = round((m_mgn * m_lev) / m_live_price, 4)
+    if 'BTC' in m_symbol and calc_amt < 0.0001: calc_amt = 0.0001
     st.sidebar.info(f"📊 สัญญาที่จะส่งออก: {calc_amt}")
 else:
     st.sidebar.caption("⚠️ รอราคาตลาดคำนวณสัญญา...")
@@ -250,13 +260,12 @@ elif page == "🏆 พอร์ตทองคำ / NCCO":
                         <td style='width:15%; color:#fff;'>ขนาด: <b>{amt:.4f}</b></td>
                         <td style='width:20%; color:#fff;'>P/L ($): <span style='color:{color}; font-weight:bold;'>${p_l_usd:.2f}</span></td>
                         <td style='width:15%; color:#fff;'>P/L (%): <span style='color:{color}; font-weight:bold;'>{p_l_pct:.2f}%</span></td>
-                        <td style='width:15%; text-align:right;' id='btn_cell_{idx}'></td>
+                        <td style='width:15%; text-align:right;'></td>
                     </tr>
                 </table>
             </div>
             """, unsafe_allow_html=True)
             
-            # วางปุ่มปิดไม้เดี่ยวให้เยื้องไปทางขวาสุดอย่างสวยงาม
             col_space, col_act = st.columns([5, 1])
             if col_act.button(f"❌ ปิดไม้นี้", key=f"btn_close_gold_{idx}"):
                 close_specific_virtual_order(SYMBOL_GOLD, side, amt, "Gold")
@@ -269,7 +278,7 @@ elif page == "🏆 พอร์ตทองคำ / NCCO":
 elif page == "🟠 พอร์ต BTC Futures":
     st.title("🟠 BTC Futures Live Monitor")
     
-    SYMBOL_BTC = 'BTC/USDT'
+    SYMBOL_BTC = 'BTC/USDT:USDT'  # แก้ไขสัญลักษณ์คู่เหรียญให้เป็นแบบ Futures ครบถ้วน
     LEVERAGE_BTC = 150
     
     try:
