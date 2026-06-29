@@ -155,7 +155,7 @@ manual_asset = st.sidebar.selectbox("เลือกเหรียญ:", ["GOLD
 if manual_asset == "GOLD/NCCO":
     m_symbol = 'NCCOGOLD2USD/USDT:USDT'
     default_lev = 250
-    default_mgn = 0.02
+    default_mgn = 1.00
     default_tp = 0.50
     default_sl = 0.30
 else:
