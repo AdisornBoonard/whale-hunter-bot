@@ -8,6 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime  # <-- เพิ่มเข้ามาเพื่อจัดการเรื่องวันที่
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -28,8 +29,10 @@ TIMEFRAME = '1m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
-BASE_MARGIN = 1.0  
-DAILY_ADD = 3.0
+# --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
+BOT_START_DATE = "2026-06-29"  # <-- [ตั้งค่าที่นี่] รูปแบบ ปปปป-ดด-วว เป็นวันที่เริ่มต้นรันบอทจริง
+BASE_MARGIN = 1.00
+DAILY_ADD = 3.00
 LEVERAGE = 250
 MAX_TICKETS = 10
 TP_PERCENT = 0.50
@@ -156,9 +159,10 @@ def fire_execution_order(side, entry_price, margin_size):
 
         tg_msg = f"{emoji} *[Whale Hunter V8.9]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
-    except Exception as e: print(f"Error executing order: {e}")
-    error_msg = f"⚠️ *[Whale Hunter v8 - ยิงพลาด!]*\n• เกิดข้อผิดพลาดในการส่งคำสั่ง\n• *ฝั่ง:* {side}\n• *สาเหตุ:* `{str(e)}`"
-    send_telegram_message(error_msg)
+    except Exception as e: 
+        print(f"Error executing order: {e}")
+        error_msg = f"⚠️ *[Whale Hunter v8 - ยิงพลาด!]*\n• เกิดข้อผิดพลาดในการส่งคำสั่ง\n• *ฝั่ง:* {side}\n• *สาเหตุ:* `{str(e)}`"
+        send_telegram_message(error_msg)
 
 # --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
@@ -169,15 +173,23 @@ if __name__ == "__main__":
     print("🟢 Whale Hunter V8.9 Web Service is Active...")
     send_telegram_message("🟢 *[Whale Hunter V8.9]* บอทเริ่มทำงานในโหมด Web Service ฟรีเรียบร้อยคราบบบ!")
 
-    bot_start_time = time.time()
     last_heartbeat_time = 0.0
 
     # 2. ลูปตรวจสอบกราฟและทำงานทุกๆ 60 วินาที (1 นาที ตรงตามแท่งเทียน)
     while True:
         try:
-            days_passed = math.floor((time.time() - bot_start_time) / (24 * 60 * 60))
+            # --- ปรับปรุงใหม่: คำนวณวันจากวันที่กำหนดแบบตายตัว ---
+            start_dt = datetime.strptime(BOT_START_DATE, "%Y-%m-%d")
+            now_dt = datetime.now()
+            days_passed = (now_dt - start_dt).days
+            
+            # ป้องกันกรณีใส่เวลาเริ่มต้นเป็นอนาคต แล้วค่าติดลบ
+            if days_passed < 0: 
+                days_passed = 0
+                
             current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
 
+            # ดึงข้อมูลกราฟ
             bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
@@ -246,6 +258,7 @@ if __name__ == "__main__":
                 heartbeat_msg = (
                     f"🤖 *[Whale Hunter V8.9 - รายงานตัว]*\n"
                     f"• *สถานะบอท:* 🟢 ออนไลน์ปกติ (Web Service)\n"
+                    f"• *วันที่คำนวณบอท:* รันมาแล้ว {days_passed} วัน\n"
                     f"• *ราคาปัจจุบัน:* ${live_price}\n"
                     f"• *ตั๋วค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
                     f"• *ทุนคงเหลือ:* ${avail_cap} / สุทธิ ${total_cap}\n"
@@ -254,9 +267,9 @@ if __name__ == "__main__":
                 send_telegram_message(heartbeat_msg)
                 last_heartbeat_time = current_time
 
-            print(f"🔄 Loop Check Finished. Signal: {signal} | Price: {live_price}")
+            print(f"🔄 Loop Check Finished. Signal: {signal} | Price: {live_price} | Days Passed: {days_passed} days")
 
         except Exception as ex:
             print(f"Loop Error: {ex}")
             
-        time.sleep(60) # หน่วงเวลาลูปละ 1 นาที
+        time.sleep(20) # หน่วงเวลา 20 วินาที
