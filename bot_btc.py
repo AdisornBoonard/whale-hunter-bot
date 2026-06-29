@@ -29,20 +29,19 @@ TIMEFRAME = '5m'
 MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
-# --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
-BOT_START_DATE = "2026-06-29"   # รูปแบบ ปปปป-ดด-วว เพื่อให้ทบทุนได้ถูกต้องแม่นยำแม้บอทรีสตาร์ท
-BASE_MARGIN = 0.5               # Margin ไม้แรก $0.5
-DAILY_ADD = 1.5                  # เพิ่ม Margin วันละ $1.5
+# --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน (ตรงตามหน้าจอคอนฟิก) ---
+BOT_START_DATE = "2026-06-30"   # รูปแบบ ปปปป-ดด-วว
+BASE_MARGIN = 0.50               # Margin ไม้แรก $1 (ปรับตามภาพของพี่)
+DAILY_ADD = 1.50                 # เพิ่ม Margin วันละ $3 (ปรับตามภาพของพี่)
 LEVERAGE = 150                  # Leverage 150x
-MAX_TICKETS = 3                  # เปิดสูงสุดต่อฝั่ง 3 ไม้
-TP_PERCENT = 2.0                # TP 2%
-SL_PERCENT = 2.5                # SL 2.5%
+MAX_TICKETS = 3                 # เปิดสูงสุดต่อฝั่ง 3 ไม้
+TP_PERCENT = 2.0                # TP 2% (ปรับตามภาพของพี่)
+SL_PERCENT = 2.5                # SL 2.5% (ปรับตามภาพของพี่)
 
-# --- GLOBAL VARIABLES FOR ANTI-DOUBLE FIRE (ตัวล็อกเวลาป้องกันยิงเบิ้ลแท่งเดิม) ---
+# --- GLOBAL VARIABLES FOR ANTI-DOUBLE FIRE ---
 last_shot_timestamp_long = 0
 last_shot_timestamp_short = 0
 
-# ฟังก์ชันตั้งค่า Leverage แนะนำให้รันตอนเริ่มระบบเพื่อล็อกฝั่ง Futures
 def init_exchange_settings():
     try:
         exchange.set_leverage(LEVERAGE, SYMBOL)
@@ -55,7 +54,7 @@ class SimpleHTTPServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"BTC Whale Hunter V8.9 (Pure Divergence) is running online!")
+        self.wfile.write(b"BTC Whale Hunter V8.9 (Pure Divergence Sync) is running online!")
     def log_message(self, format, *args): return
 
 def run_web_server():
@@ -125,60 +124,61 @@ def count_active_tickets(df_trades):
     except: pass
     return l_count, s_count
 
-def fire_execution_order(side, entry_price, margin_size):
+def fire_execution_order(side, estimated_price, margin_size):
     try:
-        # คำนวณจำนวนสัญญาสำหรับ BTC
-        contract_amount = round((margin_size * LEVERAGE) / entry_price, 4)
-        if contract_amount < 0.0001:
-            contract_amount = 0.0001 
+        # 1. คำนวณขนาดสัญญาเบื้องต้นสำหรับการยิง Market Order
+        contract_amount = round((margin_size * LEVERAGE) / estimated_price, 4)
+        if contract_amount < 0.0001: contract_amount = 0.0001 
             
+        order_side = 'buy' if side == "LONG" else 'sell'
+        emoji = "🟠🚀" if side == "LONG" else "🟠💥"
+
+        # 2. ส่งคำสั่งหลัก Market Order และรับข้อมูลราคาแมตช์จริงเพื่อป้องกัน Slippage
+        main_order = exchange.create_order(symbol=SYMBOL, type='market', side=order_side, amount=contract_amount, params={'positionSide': side})
+        
+        # ดึงราคาที่แมตช์จริงจากตลาด (ถ้าแลกเปลี่ยนไม่คืนค่า ให้ใช้ราคาประเมินสำรอง)
+        entry_price = float(main_order.get('price', 0)) or float(main_order.get('average', 0)) or estimated_price
+        
+        # 3. คำนวณราคา TP/SL จากราคาต้นทุนจริงบนกระดาน
         tp_factor = TP_PERCENT / 100
         sl_factor = SL_PERCENT / 100
         
         if side == "LONG":
             tp_price = round(entry_price * (1 + tp_factor), 1)
             sl_price = round(entry_price * (1 - sl_factor), 1)
-            order_side = 'buy'
-            emoji = "🟠🚀"
         else:
             tp_price = round(entry_price * (1 - tp_factor), 1)
             sl_price = round(entry_price * (1 + sl_factor), 1)
-            order_side = 'sell'
-            emoji = "🟠💥"
 
-        # ส่งคำสั่ง Market Order หลัก
-        exchange.create_order(symbol=SYMBOL, type='market', side=order_side, amount=contract_amount, params={'positionSide': side})
         try:
-            # ส่งคำสั่งผูกเงื่อนไข TP/SL ครบเซ็ต
+            # 4. ส่งคำสั่งตั้งเงื่อนไขพ่วง TP/SL เฝ้าบนกระดานกระชั้นชิด
             tp_sl_side = 'sell' if side == 'LONG' else 'buy'
             exchange.create_order(symbol=SYMBOL, type='TAKE_PROFIT_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': tp_price, 'workingType': 'MARK_PRICE'})
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = f"{emoji} *[Whale Hunter BTC - Pure 5m]* ยิงสำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.2f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
+        tg_msg = f"{emoji} *[Whale Hunter BTC - Pure Sync]* ยิงสำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาทุนจริง:* ${entry_price}\n• *Margin:* ${margin_size:.2f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
     except Exception as e: 
         print(f"Error BTC order: {e}")
         error_msg = f"⚠️ *[Whale Hunter BTC - ยิงพลาด!]*\n• เกิดข้อผิดพลาดในการส่งคำสั่ง\n• *ฝั่ง:* {side}\n• *สาเหตุ:* `{str(e)}`"
         send_telegram_message(error_msg)
-        
 
 # --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     
-    # รันการซิงค์ค่าระบบ Futures เบื้องต้น
     init_exchange_settings()
 
-    print("🟢 BTC Whale Hunter (Pure Mode) is Active...")
-    send_telegram_message("🟠 *[Whale Hunter BTC]* เริ่มระบบเฝ้ากราฟแบบ Pure Divergence (No Filter) เรียบร้อยครับพี่!")
+    print("🟢 BTC Whale Hunter (Pure Mode Sync V8.9) is Active...")
+    send_telegram_message("🟠 *[Whale Hunter BTC]* เริ่มระบบเฝ้ากราฟแบบ Pure Divergence (ปิด EMA & CCI ทั้งกระดาน) เรียบร้อยครับพี่!")
 
     last_heartbeat_time = 0.0
 
     while True:
         try:
-            # คำนวณวันจาก String วันที่กำหนดไว้อย่างแม่นยำ
+            # คำนวณวันทบต้นทุน Margin รายวัน
             start_dt = datetime.strptime(BOT_START_DATE, "%Y-%m-%d")
             now_dt = datetime.now()
             days_passed = (now_dt - start_dt).days
@@ -186,21 +186,28 @@ if __name__ == "__main__":
             
             current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
 
+            # ดึงข้อมูลแท่งเทียนแท่งล่าสุด
             bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
+            # คำนวณ Indicator พื้นฐาน
             df['mfi'] = calculate_mfi(df, length=MFI_LENGTH)
             df['v_ma'] = df['volume'].rolling(window=20).mean()
             
+            # ดึงข้อมูล "แท่งที่เพิ่งปิดตัวลงสมบูรณ์" (Index -2) มาวิเคราะห์เพื่อไม่ให้สัญญาณเพ้นท์ย้อนหลัง
             idx = len(df) - 2
-            candle_timestamp = df.iloc[idx]['timestamp'] # ดึงค่าเวลาของแท่งอินเด็กซ์ -2 มาใช้ล็อกเวลากันยิงซ้ำ
+            candle_timestamp = df.iloc[idx]['timestamp'] 
             readable_candle_time = pd.to_datetime(candle_timestamp, unit='ms').strftime('%Y-%m-%d %H:%M')
             
             c_high, c_low, c_vol = df.iloc[idx]['high'], df.iloc[idx]['low'], df.iloc[idx]['volume']
             c_mfi, c_vma = df.iloc[idx]['mfi'], df.iloc[idx]['v_ma']
+            
+            # ดึงข้อมูลแท่งก่อนหน้าตัวมันเองอีกหนึ่งชั้น (Index -3) ถอดลอจิกตามสูตร [1] ของ TradingView เป๊ะๆ
             p_high, p_low, p_mfi = df.iloc[idx-1]['high'], df.iloc[idx-1]['low'], df.iloc[idx-1]['mfi']
             
-            # เงื่อนไข Divergence + วอลลุ่ม
+            # ====================================================
+            # 📌 PURE LOGIC CONFIGURATION (งดใช้ EMA & CCI ไร้ตัวกรอง)
+            # ====================================================
             bull_div = (c_low < p_low) and (c_mfi > p_mfi) and (c_mfi < 40)
             bear_div = (c_high > p_high) and (c_mfi < p_mfi) and (c_mfi > 60)
             is_w = c_vol > (c_vma * VOL_MULTIPLIER)
@@ -216,20 +223,20 @@ if __name__ == "__main__":
             df_trades = fetch_trades_safe()
             active_l, active_s = count_active_tickets(df_trades)
 
-            # --- 🔥 เพิ่มลอจิกตรวจสอบกุญแจเวลา ดักการยิงซ้ำภายในแท่งเดิม ---
+            # --- ตรวจสอบเงื่อนไขการส่งคำสั่ง + ล็อกเวลาป้องกันยิงเบิ้ลแท่งเดิม ---
             if signal == "LONG" and active_l < MAX_TICKETS:
                 if candle_timestamp != last_shot_timestamp_long:
                     fire_execution_order("LONG", live_price, current_mgn_active)
-                    last_shot_timestamp_long = candle_timestamp  # ประทับตราล็อกเวลาแท่งนี้ทันทีหลังยิง
+                    last_shot_timestamp_long = candle_timestamp  
                 else:
-                    print(f"⏳ [ANTI-DOUBLE LONG] สัญญาณซ้ำในแท่ง 5m เดิม ({readable_candle_time}) บอทล็อกข้ามให้ครับพี่")
+                    print(f"⏳ [ANTI-DOUBLE LONG] สัญญาณซ้ำแท่งเดิม ({readable_candle_time}) บอทล็อกข้ามให้ครับพี่")
 
             elif signal == "SHORT" and active_s < MAX_TICKETS:
                 if candle_timestamp != last_shot_timestamp_short:
                     fire_execution_order("SHORT", live_price, current_mgn_active)
-                    last_shot_timestamp_short = candle_timestamp # ประทับตราล็อกเวลาแท่งนี้ทันทีหลังยิง
+                    last_shot_timestamp_short = candle_timestamp 
                 else:
-                    print(f"⏳ [ANTI-DOUBLE SHORT] สัญญาณซ้ำในแท่ง 5m เดิม ({readable_candle_time}) บอทล็อกข้ามให้ครับพี่")
+                    print(f"⏳ [ANTI-DOUBLE SHORT] สัญญาณซ้ำแท่งเดิม ({readable_candle_time}) บอทล็อกข้ามให้ครับพี่")
 
             # --- Heartbeat ทุกๆ 1 ชม. ---
             current_time = time.time()
@@ -257,4 +264,5 @@ if __name__ == "__main__":
         except Exception as ex:
             print(f"Loop Error: {ex}")
             
-        time.sleep(60) # เช็กสัญญาณสอดคล้องต่อเนื่องรายนาที (ตื่นทุก 1 นาทีตามเดิม)
+        # ปรับความเร็วลูปให้เหมาะสม: บอทจะหลับคราวละ 10 วินาที เพื่อรีบตื่นขึ้นมาตรวจเช็คต้นแท่งใหม่อย่างรวดเร็ว ไม่พลาดวินาทีแรกที่สัญญาณเกิด
+        time.sleep(10)
