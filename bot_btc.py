@@ -8,7 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime  # <-- เพิ่มเข้ามาเพื่อจัดการวันที่แบบเสถีย
+from datetime import datetime
 
 # --- CONFIGURATION FROM USER DASHBOARD ---
 load_dotenv()
@@ -30,15 +30,19 @@ MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
 # --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
-BOT_START_DATE = "2026-06-29"   # <-- [ตั้งค่าที่นี่] รูปแบบ ปปปป-ดด-วว เพื่อให้ทบทุนได้ถูกต้องแม่นยำแม้บอทรีสตาร์ท
+BOT_START_DATE = "2026-06-29"   # รูปแบบ ปปปป-ดด-วว เพื่อให้ทบทุนได้ถูกต้องแม่นยำแม้บอทรีสตาร์ท
 BASE_MARGIN = 0.5               # Margin ไม้แรก $0.5
-DAILY_ADD = 1.5                 # เพิ่ม Margin วันละ $1.5
+DAILY_ADD = 1.5                  # เพิ่ม Margin วันละ $1.5
 LEVERAGE = 150                  # Leverage 150x
-MAX_TICKETS = 3                 # เปิดสูงสุดต่อฝั่ง 3 ไม้
+MAX_TICKETS = 3                  # เปิดสูงสุดต่อฝั่ง 3 ไม้
 TP_PERCENT = 2.0                # TP 2%
 SL_PERCENT = 2.5                # SL 2.5%
 
-#ฟังก์ชันตั้งค่า Leverage แนะนำให้รันตอนเริ่มระบบเพื่อล็อกฝั่ง Futures
+# --- GLOBAL VARIABLES FOR ANTI-DOUBLE FIRE (ตัวล็อกเวลาป้องกันยิงเบิ้ลแท่งเดิม) ---
+last_shot_timestamp_long = 0
+last_shot_timestamp_short = 0
+
+# ฟังก์ชันตั้งค่า Leverage แนะนำให้รันตอนเริ่มระบบเพื่อล็อกฝั่ง Futures
 def init_exchange_settings():
     try:
         exchange.set_leverage(LEVERAGE, SYMBOL)
@@ -107,7 +111,6 @@ def count_active_tickets(df_trades):
 
         if active_positions and not df_trades.empty:
             for side, current_actual_size in active_positions.items():
-                # แก้ไขบั๊ก Logic เดิม: คัดกรองฝั่งออเดอร์ให้ตรงกับตัวแปร side ของลูปปัจจุบัน
                 target_trade_side = 'buy' if side == 'LONG' else 'sell'
                 df_filtered = df_trades[(df_trades['side'] == side) & (df_trades['trade_side'] == target_trade_side)]
                 accumulated_size = 0.0
@@ -124,10 +127,10 @@ def count_active_tickets(df_trades):
 
 def fire_execution_order(side, entry_price, margin_size):
     try:
-        # คำนวณจำนวนสัญญาสำหรับ BTC (ปัดทศนิยม 4 ตำแหน่ง เหมาะสำหรับ Lot ขั้นต่ำ 0.0001 BTC บน BingX Futures)
+        # คำนวณจำนวนสัญญาสำหรับ BTC
         contract_amount = round((margin_size * LEVERAGE) / entry_price, 4)
         if contract_amount < 0.0001:
-            contract_amount = 0.0001 # ป้องกันกรณี Margin น้อยเกินไปจนส่งออเดอร์ไม่ได้
+            contract_amount = 0.0001 
             
         tp_factor = TP_PERCENT / 100
         sl_factor = SL_PERCENT / 100
@@ -143,7 +146,7 @@ def fire_execution_order(side, entry_price, margin_size):
             order_side = 'sell'
             emoji = "🟠💥"
 
-        # ส่งคำสั่ง Market Order หลักเข้าสู่ระบบ Futures แบบระบุ Position Side
+        # ส่งคำสั่ง Market Order หลัก
         exchange.create_order(symbol=SYMBOL, type='market', side=order_side, amount=contract_amount, params={'positionSide': side})
         try:
             # ส่งคำสั่งผูกเงื่อนไข TP/SL ครบเซ็ต
@@ -190,6 +193,9 @@ if __name__ == "__main__":
             df['v_ma'] = df['volume'].rolling(window=20).mean()
             
             idx = len(df) - 2
+            candle_timestamp = df.iloc[idx]['timestamp'] # ดึงค่าเวลาของแท่งอินเด็กซ์ -2 มาใช้ล็อกเวลากันยิงซ้ำ
+            readable_candle_time = pd.to_datetime(candle_timestamp, unit='ms').strftime('%Y-%m-%d %H:%M')
+            
             c_high, c_low, c_vol = df.iloc[idx]['high'], df.iloc[idx]['low'], df.iloc[idx]['volume']
             c_mfi, c_vma = df.iloc[idx]['mfi'], df.iloc[idx]['v_ma']
             p_high, p_low, p_mfi = df.iloc[idx-1]['high'], df.iloc[idx-1]['low'], df.iloc[idx-1]['mfi']
@@ -210,10 +216,20 @@ if __name__ == "__main__":
             df_trades = fetch_trades_safe()
             active_l, active_s = count_active_tickets(df_trades)
 
+            # --- 🔥 เพิ่มลอจิกตรวจสอบกุญแจเวลา ดักการยิงซ้ำภายในแท่งเดิม ---
             if signal == "LONG" and active_l < MAX_TICKETS:
-                fire_execution_order("LONG", live_price, current_mgn_active)
+                if candle_timestamp != last_shot_timestamp_long:
+                    fire_execution_order("LONG", live_price, current_mgn_active)
+                    last_shot_timestamp_long = candle_timestamp  # ประทับตราล็อกเวลาแท่งนี้ทันทีหลังยิง
+                else:
+                    print(f"⏳ [ANTI-DOUBLE LONG] สัญญาณซ้ำในแท่ง 5m เดิม ({readable_candle_time}) บอทล็อกข้ามให้ครับพี่")
+
             elif signal == "SHORT" and active_s < MAX_TICKETS:
-                fire_execution_order("SHORT", live_price, current_mgn_active)
+                if candle_timestamp != last_shot_timestamp_short:
+                    fire_execution_order("SHORT", live_price, current_mgn_active)
+                    last_shot_timestamp_short = candle_timestamp # ประทับตราล็อกเวลาแท่งนี้ทันทีหลังยิง
+                else:
+                    print(f"⏳ [ANTI-DOUBLE SHORT] สัญญาณซ้ำในแท่ง 5m เดิม ({readable_candle_time}) บอทล็อกข้ามให้ครับพี่")
 
             # --- Heartbeat ทุกๆ 1 ชม. ---
             current_time = time.time()
@@ -236,9 +252,9 @@ if __name__ == "__main__":
                 send_telegram_message(heartbeat_msg)
                 last_heartbeat_time = current_time
 
-            print(f"🔄 BTC Loop Finished. Signal: {signal} | Price: {live_price} | Day Count: {days_passed}")
+            print(f"🔄 BTC Loop Finished. Signal: {signal} | Price: {live_price} | Candle Time: {readable_candle_time} | Day Count: {days_passed}")
 
         except Exception as ex:
             print(f"Loop Error: {ex}")
             
-        time.sleep(60) # เช็กสัญญาณสอดคล้องต่อเนื่องรายนาที
+        time.sleep(60) # เช็กสัญญาณสอดคล้องต่อเนื่องรายนาที (ตื่นทุก 1 นาทีตามเดิม)
