@@ -30,7 +30,7 @@ MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
 # --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
-BOT_START_DATE = "2026-06-30"  
+BOT_START_DATE = "2026-06-29"  
 BASE_MARGIN = 1.00    
 DAILY_ADD = 3.00
 LEVERAGE = 250
@@ -56,7 +56,7 @@ class SimpleHTTPServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"Whale Hunter V8.9 Gold Edition is running!")
+        self.wfile.write(b"Whale Hunter V8.9.1 Gold Edition is active and fixed!")
     def log_message(self, format, *args): return
 
 def run_web_server():
@@ -66,10 +66,14 @@ def run_web_server():
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
-    except: pass
+    try: 
+        res = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        return res.json()
+    except Exception as e: 
+        print(f"Telegram Send Error: {e}")
+        return None
 
-# ปรับสูตรคำนวण MFI ให้ใช้ RMA Moving Average ใกล้เคียง Pine Script มากขึ้น
+# 🔥 FIX สูตรคำนวณ MFI (จำลอง ta.rma ของ TradingView ให้ถูกต้องและไม่แคราช)
 def calculate_mfi_pinescript(df, length=14):
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
@@ -78,32 +82,34 @@ def calculate_mfi_pinescript(df, length=14):
     negative_flow = money_flow.copy()
     
     price_change = typical_price.diff()
-    positive_flow[price_change <= 0] = 0
-    negative_flow[price_change >= 0] = 0
+    positive_flow[price_change <= 0] = 0.0
+    negative_flow[price_change >= 0] = 0.0
     
-    # จำลอง ta.rma ด้วยการใช้ ewm (alpha = 1/length) เพื่อลดความเพี้ยนสัญญาณกับ TradingView
-    pos_mf = positive_flow.ewm(alpha=1/length, adjust=False).sum()
-    neg_mf = negative_flow.ewm(alpha=1/length, adjust=False).sum()
+    # คำนวณแบบ RMA (ดัดแปลงจากสูตร Alpha ของ Pine Script)
+    alpha = 1.0 / length
+    pos_mfi_rma = positive_flow.ewm(alpha=alpha, adjust=False).mean()
+    neg_mfi_rma = negative_flow.abs().ewm(alpha=alpha, adjust=False).mean()
     
-    return 100 - (100 / (1 + (pos_mf / neg_mf.abs())))
+    # ป้องกันอาการหารด้วยศูนย์ (Division by Zero) ด้วยการบวกค่าเล็กๆ (1e-10) ดักไว้
+    mfi_val = 100.0 - (100.0 / (1.0 + (pos_mfi_rma / (neg_mfi_rma + 1e-10))))
+    return mfi_val
 
 def calculate_cci(df, length=100):
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     sma = typical_price.rolling(window=length).mean()
     mad = typical_price.rolling(window=length).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-    return (typical_price - sma) / (0.015 * mad)
+    return (typical_price - sma) / (0.015 * (mad + 1e-10))
 
 def check_is_weekend():
-    """ระบบตรวจจับวันหยุดทองคำ (เสาร์ 04:00 ถึง จันทร์ 05:00 ตามเวลาไทย)"""
     now = datetime.now()
     day = now.weekday() # 5 = เสาร์, 6 = อาทิตย์, 0 = จันทร์
     hour = now.hour
     
-    if day == 5: # วันเสาร์ (หยุดทั้งวัน หลังตีสี่)
+    if day == 5: 
         return True
-    if day == 6: # วันอาทิตย์ (หยุดทั้งวัน)
+    if day == 6: 
         return True
-    if day == 0 and hour < 5: # วันจันทร์เช้ามืด (ก่อนตีห้า)
+    if day == 0 and hour < 5: 
         return True
     return False
 
@@ -181,26 +187,28 @@ def fire_execution_order(side, entry_price, margin_size):
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = f"{emoji} *[Whale Hunter V8.9]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
+        tg_msg = f"{emoji} *[Whale Hunter V8.9.1]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
         send_telegram_message(tg_msg)
     except Exception as e: 
         print(f"Error executing order: {e}")
+        send_telegram_message(f"⚠️ *[Whale Hunter]* ยิงพลาดเนื่องจาก: `{str(e)}`")
 
 # --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("🟢 Whale Hunter V8.9 Engine Active...")
-    send_telegram_message("🟢 *[Whale Hunter V8.9]* บอทเวอร์ชันแก้บั๊กลอจิก + Weekend Filter พร้อมเฝ้ากราฟทองคำแล้วคราบบบ!")
+    print("🟢 Whale Hunter V8.9.1 Fixed Engine Active...")
+    # บังคับส่งสัญญาณแจ้งเปิดบอททันทีเพื่อยืนยันว่า Token Telegram ถูกต้องและทำงานได้จริง
+    send_telegram_message("🟢 *[Whale Hunter V8.9.1]* บอทเวอร์ชันแก้ไขจุดบกพร่องสูตรคำนวณ เริ่มทำงานออนไลน์แล้วคราบบบ!")
 
-    last_heartbeat_time = 0.0
+    # ตั้งค่าเริ่มต้นให้รายงานตัวทันทีในลูปแรก (ไม่ต้องรอนาน)
+    last_heartbeat_time = 0.0 
 
     while True:
         try:
-            # 1. เช็กระบบ Weekend Filter ก่อนดึงกราฟเพื่อประหยัด Rate Limit API
             if check_is_weekend():
-                print("⏳ [WEEKEND FILTER] ตลาดทองคำปิดทำการช่วงวันหยุด บอทพักผ่อนระงับการยิงชั่วคราวครับพี่")
+                print("⏳ [WEEKEND FILTER] ตลาดทองคำปิดทำการช่วงวันหยุด บอทระงับการทำงานชั่วคราว...")
                 time.sleep(60)
                 continue
 
@@ -210,7 +218,7 @@ if __name__ == "__main__":
             if days_passed < 0: days_passed = 0
             current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
 
-            # ขยายลิมิตแท่งเทียนเป็น 300 แท่ง เพื่อแก้ไขปัญหาจุดที่ 3 (EMA 10 ท้ายเส้นจะได้ไม่บิดเบี้ยว)
+            # ใช้ดึงข้อมูลย้อนหลัง 300 แท่งเพื่อให้ฐานคำนวณ EMA 10 อิ่มตัวและนิ่งเท่ากราฟจริง
             bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=300)
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
@@ -241,10 +249,8 @@ if __name__ == "__main__":
             ema_distance = abs(c_close - c_ema) / c_ema * 100
             far_from_ema = ema_distance >= EMA_REVERSE_DIST
             
-            # --- ถอดรหัสลอจิกตามโครงสร้าง Pine Script ลำดับขั้นแบบ 100% ---
             l_sig, s_sig = False, False
             
-            # ลำดับขั้นที่ 1: จัดการตัวกรองตามแนวโน้มเส้น EMA 
             if not USE_EMA:
                 l_sig = long_base
                 s_sig = short_base
@@ -262,10 +268,9 @@ if __name__ == "__main__":
                         if ema_bull: s_sig = True
                         else: l_sig = True
                     else:
-                        if ema_bear: s_sig = True # 🔥 แก้ไขบั๊กตรงนี้เรียบร้อย สอดคล้องตามสูตรต้นฉบับ
+                        if ema_bear: s_sig = True 
                         else: l_sig = True
 
-            # ลำดับขั้นที่ 2: วิ่งเข้าตัวกรองระเบิดราคาของอินดิเคเตอร์ CCI Reversal
             if USE_CCI and (l_sig or s_sig):
                 if c_cci > CCI_OB:
                     s_sig = True
@@ -274,7 +279,6 @@ if __name__ == "__main__":
                     l_sig = True
                     s_sig = False
 
-            # แปลงค่าสัญญาณเพื่อพร้อมนำไปยิงออเดอร์เข้าพอร์ตหลัก
             signal = "HOLD"
             if l_sig: signal = "LONG"
             elif s_sig: signal = "SHORT"
@@ -283,7 +287,6 @@ if __name__ == "__main__":
             df_trades = fetch_trades_safe()
             active_l, active_s = count_active_tickets(df_trades)
 
-            # --- 🔥 ระบบป้องกันออกตั๋วซ้ำซ้อนซ่อนเร้น (Anti-Double Fire) ---
             if signal == "LONG" and active_l < MAX_TICKETS:
                 if candle_timestamp != last_shot_timestamp_long:
                     fire_execution_order("LONG", live_price, current_mgn_active)
@@ -298,9 +301,9 @@ if __name__ == "__main__":
                 else:
                     print(f"⏳ [ANTI-DOUBLE SHORT] สัญญาณซ้ำในแท่งเดิม ({readable_candle_time})")
 
-            # --- Heartbeat ประจำชั่วโมง ---
+            # --- Heartbeat ประจำชั่วโมง (ส่งทันทีในรอบแรก) ---
             current_time = time.time()
-            if current_time - last_heartbeat_time >= 3600:
+            if last_heartbeat_time == 0.0 or (current_time - last_heartbeat_time >= 3600):
                 try:
                     bal = exchange.fetch_balance()
                     total_cap = round(float(bal.get('USDT', {}).get('total', 0.0)), 2)
@@ -308,11 +311,12 @@ if __name__ == "__main__":
                 except: total_cap, avail_cap = 0.0, 0.0
                 
                 heartbeat_msg = (
-                    f"🤖 *[Whale Hunter V8.9 - รายงานตัว]*\n"
-                    f"• *สถานะบอท:* 🟢 ออนไลน์ปกติ (Web Service)\n"
+                    f"🤖 *[Whale Hunter V8.9.1 - รายงานตัว]*\n"
+                    f"• *สถานะบอท:* 🟢 ออนไลน์ปกติ (Fixed Engine)\n"
                     f"• *ราคาปัจจุบัน:* ${live_price}\n"
                     f"• *ตั๋วค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
-                    f"• *Margin ไม้ถัดไป:* ${current_mgn_active:.4f}"
+                    f"• *Margin ไม้ถัดไป:* ${current_mgn_active:.4f}\n"
+                    f"• *ทุนสุทธิในพอร์ต:* ${total_cap} USDT"
                 )
                 send_telegram_message(heartbeat_msg)
                 last_heartbeat_time = current_time
@@ -320,6 +324,6 @@ if __name__ == "__main__":
             print(f"🔄 Loop Check Finished. Signal: {signal} | Price: {live_price} | Candle: {readable_candle_time}")
 
         except Exception as ex:
-            print(f"Loop Error: {ex}")
+            print(f"⚠️ Loop Error Detected: {ex}")
             
-        time.sleep(60)
+        time.sleep(10)
