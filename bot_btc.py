@@ -30,7 +30,7 @@ MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
 # --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน (ตรงตามหน้าจอคอนฟิก) ---
-BOT_START_DATE = "2026-06-30"   # รูปแบบ ปปปป-ดด-วว
+BOT_START_DATE = "2026-06-31"   # รูปแบบ ปปปป-ดด-วว
 BASE_MARGIN = 0.50               # Margin ไม้แรก $1 (ปรับตามภาพของพี่)
 DAILY_ADD = 1.50                 # เพิ่ม Margin วันละ $3 (ปรับตามภาพของพี่)
 LEVERAGE = 150                  # Leverage 150x
