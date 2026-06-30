@@ -30,7 +30,7 @@ MFI_LENGTH = 14
 VOL_MULTIPLIER = 0.7
 
 # --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
-BOT_START_DATE = "2026-06-31"  
+BOT_START_DATE = "2026-07-01"  
 BASE_MARGIN = 1.00    
 DAILY_ADD = 3.00
 LEVERAGE = 250
