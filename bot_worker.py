@@ -46,7 +46,7 @@ TP_PERCENT_M5 = 3.0
 SL_PERCENT_M5 = 3.0        
 
 # --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
-BOT_START_DATE = "2026-07-01"  
+BOT_START_DATE = "2026-07-07"  
 BASE_MARGIN = 1.00    
 DAILY_ADD = 3.00
 LEVERAGE = 20            
