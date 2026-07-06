@@ -24,39 +24,46 @@ exchange = ccxt.bingx({
     'options': {'defaultType': 'swap'} 
 })
 
-SYMBOL = 'NCCOGOLD2USD/USDT:USDT'
-TIMEFRAME = '1m'
-MFI_LENGTH = 14
-VOL_MULTIPLIER = 0.7
+# เปลี่ยนตัวแปรสำหรับคริปโตคู่ LABUSDT
+SYMBOL = 'LAB/USDT:USDT'
+
+# ==========================================
+# ⚙️ SETTING 1: สำหรับไทม์เฟรม 1m
+# ==========================================
+TIMEFRAME_M1 = '1m'
+P_LENGTH_M1 = 23            
+SRC_THRESHOLD_M1 = 0.2     
+TP_PERCENT_M1 = 3.0        
+SL_PERCENT_M1 = 3.0        
+
+# ==========================================
+# ⚙️ SETTING 2: สำหรับไทม์เฟรม 5m
+# ==========================================
+TIMEFRAME_M5 = '5m'
+P_LENGTH_M5 = 27            
+SRC_THRESHOLD_M5 = 1.6     
+TP_PERCENT_M5 = 3.0        
+SL_PERCENT_M5 = 3.0        
 
 # --- ตั้งค่าระบบคำนวณ Margin ทบรายวัน ---
 BOT_START_DATE = "2026-07-01"  
 BASE_MARGIN = 1.00    
 DAILY_ADD = 3.00
-LEVERAGE = 250
+LEVERAGE = 20            
 MAX_TICKETS = 10
-TP_PERCENT = 0.50
-SL_PERCENT = 0.30
 
-USE_EMA = True
-EMA_LENGTH = 10
-EMA_REVERSE_DIST = 1.5
-
-USE_CCI = True
-CCI_LENGTH = 100
-CCI_OB = 40.0
-CCI_OS = -150.0
-
-# --- GLOBAL VARIABLES FOR ANTI-DOUBLE FIRE ---
-last_shot_timestamp_long = 0
-last_shot_timestamp_short = 0
+# --- GLOBAL VARIABLES FOR ANTI-DOUBLE FIRE (แยกคีย์ตัดสัญญาณซ้ำอิสระ) ---
+last_shot_m1_long = 0
+last_shot_m1_short = 0
+last_shot_m5_long = 0
+last_shot_m5_short = 0
 
 class SimpleHTTPServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"Whale Hunter V8.9.1 Gold Edition is active and fixed!")
+        self.wfile.write(b"Whale Hunter V9.5 24/7 Engine is active!")
     def log_message(self, format, *args): return
 
 def run_web_server():
@@ -73,45 +80,23 @@ def send_telegram_message(message):
         print(f"Telegram Send Error: {e}")
         return None
 
-# 🔥 FIX สูตรคำนวณ MFI (จำลอง ta.rma ของ TradingView ให้ถูกต้องและไม่แคราช)
-def calculate_mfi_pinescript(df, length=14):
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    money_flow = typical_price * df['volume']
+# ฟังก์ชันหาตำแหน่งยอดคลื่น Local Pivot (ถอดลอจิกจาก Pine Script)
+def find_pivots(df, length):
+    highs = df['high'].values
+    lows = df['low'].values
+    p_highs = [np.nan] * len(df)
+    p_lows = [np.nan] * len(df)
     
-    positive_flow = money_flow.copy()
-    negative_flow = money_flow.copy()
-    
-    price_change = typical_price.diff()
-    positive_flow[price_change <= 0] = 0.0
-    negative_flow[price_change >= 0] = 0.0
-    
-    # คำนวณแบบ RMA (ดัดแปลงจากสูตร Alpha ของ Pine Script)
-    alpha = 1.0 / length
-    pos_mfi_rma = positive_flow.ewm(alpha=alpha, adjust=False).mean()
-    neg_mfi_rma = negative_flow.abs().ewm(alpha=alpha, adjust=False).mean()
-    
-    # ป้องกันอาการหารด้วยศูนย์ (Division by Zero) ด้วยการบวกค่าเล็กๆ (1e-10) ดักไว้
-    mfi_val = 100.0 - (100.0 / (1.0 + (pos_mfi_rma / (neg_mfi_rma + 1e-10))))
-    return mfi_val
+    for i in range(length, len(df) - length):
+        if highs[i] == max(highs[i - length : i + length + 1]):
+            p_highs[i] = highs[i]
+        if lows[i] == min(lows[i - length : i + length + 1]):
+            p_lows[i] = lows[i]
+    return p_highs, p_lows
 
-def calculate_cci(df, length=100):
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    sma = typical_price.rolling(window=length).mean()
-    mad = typical_price.rolling(window=length).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-    return (typical_price - sma) / (0.015 * (mad + 1e-10))
-
+# ปลดล็อกให้รัน 24/7 ตลอดทั้งวันเสาร์-อาทิตย์
 def check_is_weekend():
-    now = datetime.now()
-    day = now.weekday() # 5 = เสาร์, 6 = อาทิตย์, 0 = จันทร์
-    hour = now.hour
-    
-    if day == 5: 
-        return True
-    if day == 6: 
-        return True
-    if day == 0 and hour < 5: 
-        return True
-    return False
+    return False  # Crypto Never Sleeps
 
 def fetch_trades_safe():
     try:
@@ -140,7 +125,7 @@ def count_active_tickets(df_trades):
             size = float(pos.get('contracts', 0)) or float(pos.get('size', 0))
             if size != 0:
                 pos_symbol = pos.get('symbol', '').upper()
-                if 'GOLD' in pos_symbol or 'NCCO' in pos_symbol:
+                if 'LAB' in pos_symbol:
                     side = pos.get('side', '').upper() or ('LONG' if size > 0 else 'SHORT')
                     active_positions[side] = abs(size)
 
@@ -160,22 +145,22 @@ def count_active_tickets(df_trades):
     except: pass
     return l_count, s_count
 
-def fire_execution_order(side, entry_price, margin_size):
+def fire_execution_order(side, entry_price, margin_size, timeframe, tp_pct, sl_pct):
     try:
         contract_amount = round((margin_size * LEVERAGE) / entry_price, 4)
-        tp_factor = TP_PERCENT / 100
-        sl_factor = SL_PERCENT / 100
+        tp_factor = tp_pct / 100
+        sl_factor = sl_pct / 100
         
         if side == "LONG":
-            tp_price = round(entry_price * (1 + tp_factor), 2)
-            sl_price = round(entry_price * (1 - sl_factor), 2)
+            tp_price = round(entry_price * (1 + tp_factor), 4)
+            sl_price = round(entry_price * (1 - sl_factor), 4)
             order_side = 'buy'
-            emoji = "🚀"
+            emoji = f"🚀 [Double Bottom ({timeframe})]"
         else:
-            tp_price = round(entry_price * (1 - tp_factor), 2)
-            sl_price = round(entry_price * (1 + sl_factor), 2)
+            tp_price = round(entry_price * (1 - tp_factor), 4)
+            sl_price = round(entry_price * (1 + sl_factor), 4)
             order_side = 'sell'
-            emoji = "💥"
+            emoji = f"💥 [Double Top ({timeframe})]"
 
         try: exchange.set_leverage(LEVERAGE, SYMBOL)
         except: pass
@@ -187,143 +172,131 @@ def fire_execution_order(side, entry_price, margin_size):
             exchange.create_order(symbol=SYMBOL, type='STOP_MARKET', side=tp_sl_side, amount=contract_amount, params={'positionSide': side, 'stopPrice': sl_price, 'workingType': 'MARK_PRICE'})
         except: pass
 
-        tg_msg = f"{emoji} *[Whale Hunter V8.9.1]* ยิงออโต้สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f}\n🎯 *TP:* ${tp_price} | 🛑 *SL:* ${sl_price}"
+        tg_msg = f"{emoji} ยิง LABUSDT สำเร็จ!\n• *ฝั่ง:* {side}\n• *ราคาเข้า:* ${entry_price}\n• *Margin:* ${margin_size:.4f} ({LEVERAGE}x)\n🎯 *TP ({tp_pct}%):* ${tp_price} | 🛑 *SL ({sl_pct}%):* ${sl_price}"
         send_telegram_message(tg_msg)
     except Exception as e: 
-        print(f"Error executing order: {e}")
-        send_telegram_message(f"⚠️ *[Whale Hunter]* ยิงพลาดเนื่องจาก: `{str(e)}`")
+        print(f"Error executing order ({timeframe}): {e}")
+        send_telegram_message(f"⚠️ *[Whale Hunter]* สัญญาณ {timeframe} ยิงพลาดเนื่องจาก: `{str(e)}`")
+
+# ตรรกะแกะรอยหา Pattern จากชุดข้อมูล DataFrame
+def analyze_pattern_signals(df, p_length, threshold):
+    df = df.copy()
+    df['p_high'], df['p_low'] = find_pivots(df, p_length)
+    
+    idx = len(df) - 1 - p_length
+    candle_ts = df.iloc[idx]['timestamp']
+    readable_time = pd.to_datetime(candle_ts, unit='ms').strftime('%Y-%m-%d %H:%M')
+    
+    double_bottom = False
+    double_top = False
+    
+    # ดักสัญญาณขาขึ้น (Double Bottom)
+    if not pd.isna(df.iloc[idx]['p_low']):
+        pl1 = df.iloc[idx]['p_low']
+        df_past_lows = df.iloc[:idx].dropna(subset=['p_low'])
+        if not df_past_lows.empty:
+            pl2 = df_past_lows.iloc[-1]['p_low']
+            if (abs(pl1 - pl2) / pl2 * 100) <= threshold:
+                double_bottom = True
+
+    # ดักสัญญาณขาลง (Double Top)
+    if not pd.isna(df.iloc[idx]['p_high']):
+        ph1 = df.iloc[idx]['p_high']
+        df_past_highs = df.iloc[:idx].dropna(subset=['p_high'])
+        if not df_past_highs.empty:
+            ph2 = df_past_highs.iloc[-1]['p_high']
+            if (abs(ph1 - ph2) / ph2 * 100) <= threshold:
+                double_top = True
+                
+    signal = "HOLD"
+    if double_bottom: signal = "LONG"
+    elif double_top: signal = "SHORT"
+    
+    return signal, candle_ts, readable_time
 
 # --- MAIN LOOP ENGINE ---
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("🟢 Whale Hunter V8.9.1 Fixed Engine Active...")
-    # บังคับส่งสัญญาณแจ้งเปิดบอททันทีเพื่อยืนยันว่า Token Telegram ถูกต้องและทำงานได้จริง
-    send_telegram_message("🟢 *[Whale Hunter V8.9.1]* บอทเวอร์ชันแก้ไขจุดบกพร่องสูตรคำนวณ เริ่มทำงานออนไลน์แล้วคราบบบ!")
+    print("🟢 Whale Hunter V9.5 Dual-Engine (LABUSDT 24/7) Active...")
+    send_telegram_message("🟢 *[Whale Hunter V9.5]* ระบบ 24/7 คริปโตคู่ LABUSDT เฝ้าควบ 1m และ 5m ทำงานเต็มระบบแล้วครับ!")
 
-    # ตั้งค่าเริ่มต้นให้รายงานตัวทันทีในลูปแรก (ไม่ต้องรอนาน)
     last_heartbeat_time = 0.0 
 
     while True:
         try:
-            if check_is_weekend():
-                print("⏳ [WEEKEND FILTER] ตลาดทองคำปิดทำการช่วงวันหยุด บอทระงับการทำงานชั่วคราว...")
-                time.sleep(60)
-                continue
-
+            # คำนวณขยาย Margin ทบรายวันตามเวลาปัจจุบัน
             start_dt = datetime.strptime(BOT_START_DATE, "%Y-%m-%d")
             now_dt = datetime.now()
             days_passed = (now_dt - start_dt).days
             if days_passed < 0: days_passed = 0
             current_mgn_active = BASE_MARGIN + (days_passed * DAILY_ADD)
 
-            # ใช้ดึงข้อมูลย้อนหลัง 300 แท่งเพื่อให้ฐานคำนวณ EMA 10 อิ่มตัวและนิ่งเท่ากราฟจริง
-            bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=300)
-            df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            df['mfi'] = calculate_mfi_pinescript(df, length=MFI_LENGTH)
-            df['ema'] = df['close'].ewm(span=EMA_LENGTH, adjust=False).mean() 
-            df['v_ma'] = df['volume'].rolling(window=20).mean()
-            df['cci'] = calculate_cci(df, length=CCI_LENGTH)
-            
-            idx = len(df) - 2
-            candle_timestamp = df.iloc[idx]['timestamp'] 
-            readable_candle_time = pd.to_datetime(candle_timestamp, unit='ms').strftime('%Y-%m-%d %H:%M')
-            
-            c_close, c_high, c_low = df.iloc[idx]['close'], df.iloc[idx]['high'], df.iloc[idx]['low']
-            c_vol, c_mfi, c_vma = df.iloc[idx]['volume'], df.iloc[idx]['mfi'], df.iloc[idx]['v_ma']
-            c_ema, c_cci = df.iloc[idx]['ema'], df.iloc[idx]['cci']
-            
-            p_high, p_low, p_mfi = df.iloc[idx-1]['high'], df.iloc[idx-1]['low'], df.iloc[idx-1]['mfi']
-            
-            bull_div = (c_low < p_low) and (c_mfi > p_mfi) and (c_mfi < 40)
-            bear_div = (c_high > p_high) and (c_mfi < p_mfi) and (c_mfi > 60)
-            is_w = c_vol > (c_vma * VOL_MULTIPLIER)
-            
-            long_base = bull_div and is_w
-            short_base = bear_div and is_w
-            
-            ema_bull = c_close > c_ema
-            ema_bear = c_close < c_ema
-            ema_distance = abs(c_close - c_ema) / c_ema * 100
-            far_from_ema = ema_distance >= EMA_REVERSE_DIST
-            
-            l_sig, s_sig = False, False
-            
-            if not USE_EMA:
-                l_sig = long_base
-                s_sig = short_base
-            else:
-                if long_base:
-                    if far_from_ema:
-                        if ema_bull: s_sig = True
-                        else: l_sig = True
-                    else:
-                        if ema_bull: l_sig = True
-                        else: s_sig = True
-
-                if short_base:
-                    if far_from_ema:
-                        if ema_bull: s_sig = True
-                        else: l_sig = True
-                    else:
-                        if ema_bear: s_sig = True 
-                        else: l_sig = True
-
-            if USE_CCI and (l_sig or s_sig):
-                if c_cci > CCI_OB:
-                    s_sig = True
-                    l_sig = False
-                elif c_cci < CCI_OS:
-                    l_sig = True
-                    s_sig = False
-
-            signal = "HOLD"
-            if l_sig: signal = "LONG"
-            elif s_sig: signal = "SHORT"
-                        
-            live_price = df.iloc[-1]['close']
+            # ดึงสถานะออเดอร์ในพอร์ต
             df_trades = fetch_trades_safe()
             active_l, active_s = count_active_tickets(df_trades)
+            
+            # --------------------------------==================
+            # 🔎 ENGINE PART 1: แกะรอยสัญญาณ ไทม์เฟรม 1m
+            # --------------------------------==================
+            bars_m1 = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME_M1, limit=400)
+            df_m1 = pd.DataFrame(bars_m1, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            sig_m1, ts_m1, time_m1 = analyze_pattern_signals(df_m1, P_LENGTH_M1, SRC_THRESHOLD_M1)
+            live_price = df_m1.iloc[-1]['close'] 
+            
+            if sig_m1 == "LONG" and active_l < MAX_TICKETS:
+                if ts_m1 != last_shot_m1_long:
+                    fire_execution_order("LONG", live_price, current_mgn_active, "1m", TP_PERCENT_M1, SL_PERCENT_M1)
+                    last_shot_m1_long = ts_m1
+                    active_l += 1 
+            elif sig_m1 == "SHORT" and active_s < MAX_TICKETS:
+                if ts_m1 != last_shot_m1_short:
+                    fire_execution_order("SHORT", live_price, current_mgn_active, "1m", TP_PERCENT_M1, SL_PERCENT_M1)
+                    last_shot_m1_short = ts_m1
+                    active_s += 1
 
-            if signal == "LONG" and active_l < MAX_TICKETS:
-                if candle_timestamp != last_shot_timestamp_long:
-                    fire_execution_order("LONG", live_price, current_mgn_active)
-                    last_shot_timestamp_long = candle_timestamp  
-                else:
-                    print(f"⏳ [ANTI-DOUBLE LONG] สัญญาณซ้ำในแท่งเดิม ({readable_candle_time})")
+            # --------------------------------==================
+            # 🔎 ENGINE PART 2: แกะรอยสัญญาณ ไทม์เฟรม 5m
+            # --------------------------------==================
+            bars_m5 = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME_M5, limit=400)
+            df_m5 = pd.DataFrame(bars_m5, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            sig_m5, ts_m5, time_m5 = analyze_pattern_signals(df_m5, P_LENGTH_M5, SRC_THRESHOLD_M5)
+            
+            if sig_m5 == "LONG" and active_l < MAX_TICKETS:
+                if ts_m5 != last_shot_m5_long:
+                    fire_execution_order("LONG", live_price, current_mgn_active, "5m", TP_PERCENT_M5, SL_PERCENT_M5)
+                    last_shot_m5_long = ts_m5
+                    active_l += 1
+            elif sig_m5 == "SHORT" and active_s < MAX_TICKETS:
+                if ts_m5 != last_shot_m5_short:
+                    fire_execution_order("SHORT", live_price, current_mgn_active, "5m", TP_PERCENT_M5, SL_PERCENT_M5)
+                    last_shot_m5_short = ts_m5
+                    active_s += 1
 
-            elif signal == "SHORT" and active_s < MAX_TICKETS:
-                if candle_timestamp != last_shot_timestamp_short:
-                    fire_execution_order("SHORT", live_price, current_mgn_active)
-                    last_shot_timestamp_short = candle_timestamp 
-                else:
-                    print(f"⏳ [ANTI-DOUBLE SHORT] สัญญาณซ้ำในแท่งเดิม ({readable_candle_time})")
-
-            # --- Heartbeat ประจำชั่วโมง (ส่งทันทีในรอบแรก) ---
+            # --- Telegram Heartbeat รายงานสถานะบอททุกต้นชั่วโมง ---
             current_time = time.time()
             if last_heartbeat_time == 0.0 or (current_time - last_heartbeat_time >= 3600):
                 try:
                     bal = exchange.fetch_balance()
                     total_cap = round(float(bal.get('USDT', {}).get('total', 0.0)), 2)
-                    avail_cap = round(float(bal.get('USDT', {}).get('free', 0.0)), 2)
-                except: total_cap, avail_cap = 0.0, 0.0
+                except: total_cap = 0.0
                 
                 heartbeat_msg = (
-                    f"🤖 *[Whale Hunter V8.9.1 - รายงานตัว]*\n"
-                    f"• *สถานะบอท:* 🟢 ออนไลน์ปกติ (Fixed Engine)\n"
+                    f"🤖 *[Whale Hunter V9.5 - รายงาน LABUSDT]*\n"
+                    f"• *โหมดการทำงาน:* 🟢 ออนไลน์ตลอด 24 ชั่วโมง (คริปโต)\n"
                     f"• *ราคาปัจจุบัน:* ${live_price}\n"
-                    f"• *ตั๋วค้าง:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
+                    f"• *ตั๋วค้างในระบบ:* LONG [{active_l}/{MAX_TICKETS}] | SHORT [{active_s}/{MAX_TICKETS}]\n"
                     f"• *Margin ไม้ถัดไป:* ${current_mgn_active:.4f}\n"
                     f"• *ทุนสุทธิในพอร์ต:* ${total_cap} USDT"
                 )
                 send_telegram_message(heartbeat_msg)
                 last_heartbeat_time = current_time
 
-            print(f"🔄 Loop Check Finished. Signal: {signal} | Price: {live_price} | Candle: {readable_candle_time}")
+            print(f"🔄 [1m Engine] Sig: {sig_m1} @ {time_m1} | [5m Engine] Sig: {sig_m5} @ {time_m5} | Price: {live_price}")
 
         except Exception as ex:
-            print(f"⚠️ Loop Error Detected: {ex}")
+            print(f"⚠️ Dual-Engine Loop Error: {ex}")
             
+        # ลูปตรวจเช็คทุก ๆ 10 วินาที เพื่อความแม่นยำสูงสุดในไทม์เฟรมย่อย
         time.sleep(10)
