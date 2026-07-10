@@ -838,6 +838,46 @@ poll();
 """
 
 
+@app.route("/api/test-connection")
+def api_test_connection():
+    """Hit this directly in the browser to test the BingX connection
+    synchronously, with a short timeout, independent of the background loop."""
+    import time as _time
+    result = {"symbol": DEFAULT_CONFIG["symbol"]}
+    try:
+        test_ex = ccxt.bingx({
+            "apiKey": BINGX_API_KEY,
+            "secret": BINGX_SECRET_KEY,
+            "enableRateLimit": True,
+            "timeout": 8000,
+            "options": {"defaultType": "swap"},
+        })
+        t0 = _time.time()
+        bars = test_ex.fetch_ohlcv(DEFAULT_CONFIG["symbol"], timeframe="1m", limit=5)
+        result["ohlcv_ok"] = True
+        result["ohlcv_seconds"] = round(_time.time() - t0, 2)
+        result["last_candle"] = bars[-1] if bars else None
+    except Exception as e:
+        result["ohlcv_ok"] = False
+        result["ohlcv_error_type"] = type(e).__name__
+        result["ohlcv_error"] = str(e)
+
+    try:
+        t0 = _time.time()
+        bal = test_ex.fetch_balance()
+        result["balance_ok"] = True
+        result["balance_seconds"] = round(_time.time() - t0, 2)
+        result["usdt_total"] = bal.get("USDT", {}).get("total")
+    except Exception as e:
+        result["balance_ok"] = False
+        result["balance_error_type"] = type(e).__name__
+        result["balance_error"] = str(e)
+
+    result["api_key_set"] = bool(BINGX_API_KEY)
+    result["secret_set"] = bool(BINGX_SECRET_KEY)
+    return jsonify(result)
+
+
 @app.route("/")
 def index():
     return Response(INDEX_HTML, mimetype="text/html")
