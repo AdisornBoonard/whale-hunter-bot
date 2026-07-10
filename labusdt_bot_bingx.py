@@ -1,7 +1,7 @@
 """
 labusdt_bot_bingx.py
 --------------------
-Single-file drop-in bot for BingX Futures LABUSDT (LAB/USDT:USDT) trading the
+Single-file drop-in bot for BingX Futures LABUSDT (LAB/USDT) trading the
 RSI Momentum Divergence Zones signal, with a built-in web dashboard.
 
 Same deploy pattern as your old Whale Hunter bot: one file, one process,
@@ -197,7 +197,7 @@ def latest_signal(df: pd.DataFrame):
 # ============================================================================
 
 DEFAULT_CONFIG = {
-    "symbol": "LAB/USDT:USDT",
+    "symbol": "LABUSDT:USDT",
     "timeframe": "1m",
     "initial_bet": 1.0,
     "daily_add": 3.0,
