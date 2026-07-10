@@ -30,6 +30,7 @@ INDICATOR NOTES (see chat for full detail)
 import os
 import json
 import threading
+import uuid
 from datetime import datetime
 
 import ccxt
@@ -77,8 +78,7 @@ def rsi_of_momentum(close: np.ndarray, mom_length: int, rsi_length: int):
     with np.errstate(divide="ignore", invalid="ignore"):
         rs = roll_up / roll_down
         rsi = 100 - 100 / (1 + rs)
-        rsi[roll_down == 0] = 100.0
-        rsi[(roll_up == 0) & (roll_down == 0)] = np.nan
+        rsi[roll_down == 0] = 100.0  # matches Pine: down==0 -> 100, regardless of up
 
     return momentum, rsi
 
@@ -203,12 +203,12 @@ def latest_signal(df: pd.DataFrame):
 DEFAULT_CONFIG = {
     "symbol": "LAB/USDT:USDT",
     "timeframe": "1m",
-    "initial_bet": 0.5,
-    "daily_add": 0.3,
-    "bot_start_date": "2026-07-11",
-    "leverage": 25,
-    "tp_percent": 1.2,
-    "sl_percent": 0.6,
+    "initial_bet": 1.0,
+    "daily_add": 3.0,
+    "bot_start_date": "2026-07-07",
+    "leverage": 20,
+    "tp_percent": 1.0,
+    "sl_percent": 0.5,
     "max_tickets": 10,
     "mom_length": 10,
     "rsi_length": 4,
@@ -407,7 +407,7 @@ def count_active_tickets(symbol, df_trades, max_tickets):
     return l_count, s_count
 
 
-def fire_execution_order(symbol, side, entry_price, margin_size, leverage, tp_pct, sl_pct):
+def fire_execution_order(symbol, side, entry_price, margin_size, leverage, tp_pct, sl_pct, manual=False):
     ex = get_exchange()
     try:
         contract_amount = round((margin_size * leverage) / entry_price, 4)
@@ -438,17 +438,64 @@ def fire_execution_order(symbol, side, entry_price, margin_size, leverage, tp_pc
         except Exception:
             pass
 
+        tag = " [MANUAL]" if manual else ""
         state.add_trade({
+            "id": uuid.uuid4().hex[:10],
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "entry_ms": int(datetime.now().timestamp() * 1000),
-            "type": f"OPEN ({'BUY' if side == 'LONG' else 'SELL'})",
+            "type": f"OPEN ({'BUY' if side == 'LONG' else 'SELL'}){tag}",
             "entry": entry_price, "tp": tp_price, "sl": sl_price,
             "contract_amount": contract_amount,
             "pnl": None, "status": "OPEN", "side": side,
         })
-        state.add_log(f"ENTRY EXECUTED: {side} @ {entry_price} | TP {tp_price} / SL {sl_price}")
+        state.add_log(f"ENTRY EXECUTED{tag}: {side} @ {entry_price} | TP {tp_price} / SL {sl_price}")
+        return True, "order sent"
     except Exception as e:
         state.add_log(f"⚠️ ORDER FAILED ({side}): {e}")
+        return False, str(e)
+
+
+def open_trade_manual(side):
+    cfg = state.snapshot()["config"]
+    symbol = cfg["symbol"]
+    live_price = state.live_price
+    if not live_price:
+        return False, "No live price yet - wait for market data to load first"
+    margin = _compute_margin(cfg)
+    return fire_execution_order(symbol, side, live_price, margin, cfg["leverage"],
+                                 cfg["tp_percent"], cfg["sl_percent"], manual=True)
+
+
+def close_trade_manual(trade_id):
+    trade = next((t for t in state.trades if t.get("id") == trade_id), None)
+    if not trade:
+        return False, "Trade not found"
+    if trade.get("status") != "OPEN":
+        return False, "Trade already closed"
+
+    cfg = state.snapshot()["config"]
+    symbol = cfg["symbol"]
+    side = trade["side"]
+    amount = trade.get("contract_amount")
+    ex = get_exchange()
+    close_side = "sell" if side == "LONG" else "buy"
+    try:
+        ex.create_order(symbol=symbol, type="market", side=close_side, amount=amount,
+                         params={"positionSide": side, "reduceOnly": True})
+        exit_price = state.live_price or trade["entry"]
+        pnl = ((exit_price - trade["entry"]) * amount if side == "LONG"
+               else (trade["entry"] - exit_price) * amount)
+        with state.lock:
+            trade["status"] = "WIN" if pnl >= 0 else "LOSS"
+            trade["exit"] = exit_price
+            trade["pnl"] = round(pnl, 4)
+            trade["type"] = trade["type"] + " [MANUAL CLOSE]"
+            state._save()
+        state.add_log(f"Manual close: {side} ticket {trade_id} closed @ ~{exit_price}")
+        return True, "closed"
+    except Exception as e:
+        state.add_log(f"⚠️ Manual close failed ({trade_id}): {e}")
+        return False, str(e)
 
 
 def _find_recent_close_price(df_trades, side, close_trade_side):
@@ -479,7 +526,7 @@ def _loop():
             ex = get_exchange()
 
             state.add_log(f"Fetching {symbol} {cfg['timeframe']} candles from BingX…")
-            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=400)
+            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=1000)
             df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df = compute_divergence(df, cfg)
             live_price = float(df.iloc[-1]["close"])
@@ -615,6 +662,16 @@ INDEX_HTML = r"""<!doctype html>
     letter-spacing:.04em;cursor:pointer;transition:.15s;}
   .run-btn.active{background:var(--long);color:#062018;border-color:var(--long);}
   .run-btn.stopped{background:var(--short);color:#2a0509;border-color:var(--short);}
+  .manual-btn{border:1px solid var(--line);background:var(--panel-2);color:var(--text);
+    padding:9px 14px;border-radius:8px;font-family:inherit;font-weight:600;font-size:12px;
+    letter-spacing:.03em;cursor:pointer;}
+  .manual-btn.long{color:var(--long);border-color:var(--long);}
+  .manual-btn.short{color:var(--short);border-color:var(--short);}
+  .manual-btn:disabled{opacity:.4;cursor:not-allowed;}
+  .close-btn{background:transparent;border:1px solid var(--short);color:var(--short);
+    padding:3px 9px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;
+    cursor:pointer;}
+  .close-btn:hover{background:var(--short);color:#2a0509;}
 
   .sidebar{grid-column:1;grid-row:2;border-right:1px solid var(--line);display:flex;
     flex-direction:column;align-items:center;padding-top:16px;gap:18px;color:var(--muted);}
@@ -683,6 +740,8 @@ INDEX_HTML = r"""<!doctype html>
     <div class="status-pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
     <div class="run-switch">
       <div class="status-pill">Balance <span class="mono price" id="balanceVal" style="margin-left:6px">--</span></div>
+      <button class="manual-btn long" id="manualLongBtn">▲ LONG</button>
+      <button class="manual-btn short" id="manualShortBtn">▼ SHORT</button>
       <button class="run-btn stopped" id="runBtn">▶ RUN BOT</button>
     </div>
   </div>
@@ -755,7 +814,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="panel">
         <div class="panel-title">List Order</div>
         <table>
-          <thead><tr><th>Time</th><th>Type</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
+          <thead><tr><th>Time</th><th>Type</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th><th>Action</th></tr></thead>
           <tbody id="ordersBody"></tbody>
         </table>
       </div>
@@ -848,7 +907,16 @@ function render(data){
       <td>${t.tp??''}</td>
       <td>${t.sl??''}</td>
       <td class="status-${(t.status||'').toLowerCase()}">${t.status||''}</td>
+      <td>${t.status==='OPEN' && t.id ? `<button class="close-btn" data-id="${t.id}">CLOSE</button>` : ''}</td>
     </tr>`).join('');
+  ordersBody.querySelectorAll('.close-btn').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      btn.disabled = true; btn.textContent = '...';
+      const res = await fetch('/api/close-order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id: btn.dataset.id})});
+      const j = await res.json();
+      if(!j.ok) alert('Close failed: ' + (j.message||j.error||'unknown error'));
+    });
+  });
 
   const logBody = document.getElementById('logBody');
   logBody.innerHTML = data.logs.slice().reverse().map(l=>`<div class="logline"><span class="t">${l.time}</span><span>${l.text}</span></div>`).join('');
@@ -861,6 +929,20 @@ function render(data){
     cfgLoadedOnce = true;
   }
 }
+
+document.getElementById('manualLongBtn').addEventListener('click', async ()=>{
+  if(!confirm('เปิดออเดอร์ LONG ด้วยมือ ยิงจริงทันทีตาม config ปัจจุบัน แน่ใจไหม?')) return;
+  const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({side:'LONG'})});
+  const j = await res.json();
+  if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: ' + (j.message||j.error||'unknown error'));
+});
+
+document.getElementById('manualShortBtn').addEventListener('click', async ()=>{
+  if(!confirm('เปิดออเดอร์ SHORT ด้วยมือ ยิงจริงทันทีตาม config ปัจจุบัน แน่ใจไหม?')) return;
+  const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({side:'SHORT'})});
+  const j = await res.json();
+  if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: ' + (j.message||j.error||'unknown error'));
+});
 
 document.getElementById('runBtn').addEventListener('click', async ()=>{
   const willRun = document.getElementById('runBtn').textContent.includes('RUN');
@@ -965,6 +1047,26 @@ def api_run():
     payload = request.get_json(force=True) or {}
     set_running(bool(payload.get("running")))
     return jsonify({"running": state.running})
+
+
+@app.route("/api/manual-order", methods=["POST"])
+def api_manual_order():
+    payload = request.get_json(force=True) or {}
+    side = (payload.get("side") or "").upper()
+    if side not in ("LONG", "SHORT"):
+        return jsonify({"ok": False, "error": "side must be LONG or SHORT"}), 400
+    ok, msg = open_trade_manual(side)
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/close-order", methods=["POST"])
+def api_close_order():
+    payload = request.get_json(force=True) or {}
+    trade_id = payload.get("id")
+    if not trade_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    ok, msg = close_trade_manual(trade_id)
+    return jsonify({"ok": ok, "message": msg})
 
 
 if __name__ == "__main__":
