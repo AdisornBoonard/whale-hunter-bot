@@ -446,7 +446,7 @@ def _loop():
             ex = get_exchange()
 
             state.add_log(f"Fetching {symbol} {cfg['timeframe']} candles from BingX…")
-            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=1440)
+            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=500)
             df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df = compute_divergence(df, cfg)
             live_price = float(df.iloc[-1]["close"])
