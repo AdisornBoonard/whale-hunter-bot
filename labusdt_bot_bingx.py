@@ -324,6 +324,7 @@ def get_exchange():
             "apiKey": BINGX_API_KEY,
             "secret": BINGX_SECRET_KEY,
             "enableRateLimit": True,
+            "timeout": 15000,  # 15s - fail fast instead of hanging forever on a stuck connection
             "options": {"defaultType": "swap"},
         })
     return _exchange
@@ -437,17 +438,19 @@ def _compute_margin(cfg):
 
 def _loop():
     state.add_log("🟢 Engine started (market data streaming)")
-    state.connected = True
     while not _stop_flag.is_set():
         cfg = state.snapshot()["config"]
         try:
             symbol = cfg["symbol"]
             ex = get_exchange()
 
+            state.add_log(f"Fetching {symbol} {cfg['timeframe']} candles from BingX…")
             bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=400)
             df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df = compute_divergence(df, cfg)
             live_price = float(df.iloc[-1]["close"])
+            state.connected = True
+            state.add_log(f"Got {len(df)} candles, price={live_price}")
 
             indicator_payload = {
                 "timestamps": df["timestamp"].tolist(),
@@ -480,7 +483,8 @@ def _loop():
                     state.add_log(f"SIGNAL DETECTED: {sig} (no new confirmed entry)")
 
         except Exception as ex_err:
-            state.add_log(f"⚠️ Loop error: {ex_err}")
+            state.connected = False
+            state.add_log(f"⚠️ Loop error [{type(ex_err).__name__}]: {ex_err}")
 
         _stop_flag.wait(cfg.get("poll_seconds", 10))
 
