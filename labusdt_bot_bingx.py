@@ -201,7 +201,7 @@ DEFAULT_CONFIG = {
     "timeframe": "1m",
     "initial_bet": 1.0,
     "daily_add": 3.0,
-    "bot_start_date": datetime.now().strftime("%Y-%m-%d"),
+    "bot_start_date": "2026-07-07",
     "leverage": 20,
     "tp_percent": 1.0,
     "sl_percent": 0.5,
