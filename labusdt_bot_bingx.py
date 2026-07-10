@@ -13,7 +13,7 @@ SETUP
 pip install ccxt flask pandas numpy python-dotenv gunicorn requests
 .env with: BINGX_API_KEY=... / BINGX_SECRET_KEY=...
 Run locally:   python labusdt_bot_bingx.py
-Run online:    gunicorn --workers 1 --threads 4 --timeout 1200 --bind 0.0.0.0:$PORT labusdt_bot_bingx:app
+Run online:    gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT labusdt_bot_bingx:app
 
 ⚠️ MUST stay at --workers 1 online. State + the trading loop live in one
 process's memory; more than one worker/instance means duplicate real orders
@@ -182,9 +182,13 @@ def compute_divergence(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
 
 def latest_signal(df: pd.DataFrame):
-    if len(df) == 0:
+    """Uses the last CLOSED candle, not the still-forming one.
+    Most exchanges (BingX included) return the in-progress candle as the
+    final OHLCV row; checking it directly makes the signal flicker/unstable
+    until that candle actually closes. iloc[-2] is the last fully closed bar."""
+    if len(df) < 2:
         return "HOLD", None
-    last = df.iloc[-1]
+    last = df.iloc[-2]
     if bool(last["bull_div"]):
         return "LONG", int(last["timestamp"])
     if bool(last["bear_div"]):
@@ -267,6 +271,24 @@ class BotState:
             self.trades.insert(0, trade)
             self.trades = self.trades[:500]
             self._save()
+
+    def close_open_trades(self, side: str, exit_price: float):
+        """Mark every still-OPEN trade on this side as closed, computing
+        each trade's own PnL from its stored entry price and contract size."""
+        with self.lock:
+            changed = False
+            for t in self.trades:
+                if t.get("status") == "OPEN" and t.get("side") == side:
+                    entry = t.get("entry", 0) or 0
+                    amount = t.get("contract_amount", 0) or 0
+                    pnl = (exit_price - entry) * amount if side == "LONG" else (entry - exit_price) * amount
+                    t["status"] = "WIN" if pnl >= 0 else "LOSS"
+                    t["exit"] = exit_price
+                    t["pnl"] = round(pnl, 4)
+                    changed = True
+            if changed:
+                self._save()
+            return changed
 
     def update_market(self, ohlcv, indicator, live_price):
         with self.lock:
@@ -418,13 +440,24 @@ def fire_execution_order(symbol, side, entry_price, margin_size, leverage, tp_pc
 
         state.add_trade({
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_ms": int(datetime.now().timestamp() * 1000),
             "type": f"OPEN ({'BUY' if side == 'LONG' else 'SELL'})",
             "entry": entry_price, "tp": tp_price, "sl": sl_price,
+            "contract_amount": contract_amount,
             "pnl": None, "status": "OPEN", "side": side,
         })
         state.add_log(f"ENTRY EXECUTED: {side} @ {entry_price} | TP {tp_price} / SL {sl_price}")
     except Exception as e:
         state.add_log(f"⚠️ ORDER FAILED ({side}): {e}")
+
+
+def _find_recent_close_price(df_trades, side, close_trade_side):
+    if df_trades is None or df_trades.empty:
+        return None
+    closes = df_trades[(df_trades["side"] == side) & (df_trades["trade_side"] == close_trade_side)]
+    if closes.empty:
+        return None
+    return float(closes.iloc[0]["price"])  # df_trades is sorted newest-first
 
 
 def _compute_margin(cfg):
@@ -446,7 +479,7 @@ def _loop():
             ex = get_exchange()
 
             state.add_log(f"Fetching {symbol} {cfg['timeframe']} candles from BingX…")
-            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=500)
+            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=400)
             df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df = compute_divergence(df, cfg)
             live_price = float(df.iloc[-1]["close"])
@@ -465,6 +498,18 @@ def _loop():
 
             df_trades = fetch_trades_safe(symbol)
             active_l, active_s = count_active_tickets(symbol, df_trades, cfg["max_tickets"])
+
+            has_open_long = any(t.get("status") == "OPEN" and t.get("side") == "LONG" for t in state.trades)
+            has_open_short = any(t.get("status") == "OPEN" and t.get("side") == "SHORT" for t in state.trades)
+            if active_l == 0 and has_open_long:
+                exit_px = _find_recent_close_price(df_trades, "LONG", "sell") or live_price
+                state.close_open_trades("LONG", exit_px)
+                state.add_log(f"Position closed: LONG @ ~{exit_px} (TP or SL hit)")
+            if active_s == 0 and has_open_short:
+                exit_px = _find_recent_close_price(df_trades, "SHORT", "buy") or live_price
+                state.close_open_trades("SHORT", exit_px)
+                state.add_log(f"Position closed: SHORT @ ~{exit_px} (TP or SL hit)")
+
             try:
                 bal = ex.fetch_balance()
                 total_cap = float(bal.get("USDT", {}).get("total", 0.0))
