@@ -13,7 +13,7 @@ SETUP
 pip install ccxt flask pandas numpy python-dotenv gunicorn requests
 .env with: BINGX_API_KEY=... / BINGX_SECRET_KEY=...
 Run locally:   python labusdt_bot_bingx.py
-Run online:    gunicorn --workers 1 --threads 1 --timeout 120 --bind 0.0.0.0:$PORT labusdt_bot_bingx:app
+Run online:    gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT labusdt_bot_bingx:app
 
 ⚠️ MUST stay at --workers 1 online. State + the trading loop live in one
 process's memory; more than one worker/instance means duplicate real orders
@@ -446,7 +446,7 @@ def _loop():
             ex = get_exchange()
 
             state.add_log(f"Fetching {symbol} {cfg['timeframe']} candles from BingX…")
-            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=400)
+            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["timeframe"], limit=1440)
             df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df = compute_divergence(df, cfg)
             live_price = float(df.iloc[-1]["close"])
