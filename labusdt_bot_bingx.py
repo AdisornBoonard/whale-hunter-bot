@@ -437,6 +437,7 @@ def _compute_margin(cfg):
 
 
 def _loop():
+    print(f"[LOOP] PID={os.getpid()} - engine loop thread starting now", flush=True)
     state.add_log("🟢 Engine started (market data streaming)")
     while not _stop_flag.is_set():
         cfg = state.snapshot()["config"]
@@ -451,6 +452,7 @@ def _loop():
             live_price = float(df.iloc[-1]["close"])
             state.connected = True
             state.add_log(f"Got {len(df)} candles, price={live_price}")
+            print(f"[LOOP] PID={os.getpid()} - got {len(df)} candles, price={live_price}", flush=True)
 
             indicator_payload = {
                 "timestamps": df["timestamp"].tolist(),
@@ -485,6 +487,7 @@ def _loop():
         except Exception as ex_err:
             state.connected = False
             state.add_log(f"⚠️ Loop error [{type(ex_err).__name__}]: {ex_err}")
+            print(f"[LOOP] PID={os.getpid()} - ERROR [{type(ex_err).__name__}]: {ex_err}", flush=True)
 
         _stop_flag.wait(cfg.get("poll_seconds", 10))
 
@@ -511,10 +514,12 @@ def set_running(on: bool):
 # ============================================================================
 
 app = Flask(__name__)
+print(f"[BOOT] PID={os.getpid()} - Flask app module loading, about to init engine…", flush=True)
 
 # Started at import time (not just under `if __name__ == "__main__"`) so it
 # also runs under gunicorn/production servers, same as `python this_file.py`.
 init_engine()
+print(f"[BOOT] PID={os.getpid()} - init_engine() called", flush=True)
 
 INDEX_HTML = r"""<!doctype html>
 <html lang="th">
