@@ -205,7 +205,7 @@ DEFAULT_CONFIG = {
     "timeframe": "1m",
     "initial_bet": 0.5,
     "daily_add": 0.3,
-    "bot_start_date": "2026-07-10",
+    "bot_start_date": "2026-07-11",
     "leverage": 25,
     "tp_percent": 1.2,
     "sl_percent": 0.6,
@@ -703,6 +703,14 @@ INDEX_HTML = r"""<!doctype html>
     margin-bottom:10px;display:flex;justify-content:space-between;}
   .price{font-family:'IBM Plex Mono',monospace;color:var(--gold);}
   #priceChart{height:280px;}
+  .chart-wrap{position:relative;}
+  #priceTooltip{position:absolute;top:8px;left:8px;background:rgba(18,21,30,0.95);
+    border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-family:'IBM Plex Mono',monospace;
+    font-size:11px;line-height:1.7;pointer-events:none;display:none;z-index:5;min-width:180px;
+    box-shadow:0 4px 14px rgba(0,0,0,0.4);}
+  #priceTooltip .row{display:flex;justify-content:space-between;gap:16px;}
+  #priceTooltip .lbl{color:var(--muted);}
+  #priceTooltip .pos{color:var(--long);} #priceTooltip .neg{color:var(--short);}
   #rsiChart{height:150px;}
 
   .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
@@ -796,7 +804,10 @@ INDEX_HTML = r"""<!doctype html>
   <div class="main">
     <div class="panel">
       <div class="panel-title"><span>Price Chart (LABUSDT)</span><span class="price mono" id="livePrice">--</span></div>
-      <div id="priceChart"></div>
+      <div class="chart-wrap">
+        <div id="priceChart"></div>
+        <div id="priceTooltip"></div>
+      </div>
     </div>
     <div class="panel">
       <div class="panel-title"><span>RSI (Momentum) · Divergence Zones</span><span id="posBadge" class="mono" style="color:var(--muted)">LONG 0 · SHORT 0</span></div>
@@ -852,6 +863,41 @@ function syncTimeScales(a,b){
 }
 syncTimeScales(priceChart, rsiChart);
 syncTimeScales(rsiChart, priceChart);
+
+const tooltipEl = document.getElementById('priceTooltip');
+const chartWrapEl = document.querySelector('.chart-wrap');
+function fmtPct(v){ const s=(v>=0?'+':'')+v.toFixed(2)+'%'; return s; }
+function pctClass(v){ return v>=0 ? 'pos' : 'neg'; }
+
+priceChart.subscribeCrosshairMove(param=>{
+  if(!param || !param.time || !param.seriesData || !param.seriesData.get(candleSeries)){
+    tooltipEl.style.display = 'none';
+    return;
+  }
+  const bar = param.seriesData.get(candleSeries);
+  const {open, high, low, close} = bar;
+  const change = close - open;
+  const changePct = open ? (change/open*100) : 0;
+  const highPct = open ? ((high-open)/open*100) : 0;
+  const lowPct = open ? ((low-open)/open*100) : 0;
+
+  tooltipEl.innerHTML = `
+    <div class="row"><span class="lbl">Open</span><span>${open}</span></div>
+    <div class="row"><span class="lbl">High</span><span>${high}</span></div>
+    <div class="row"><span class="lbl">Low</span><span>${low}</span></div>
+    <div class="row"><span class="lbl">Close</span><span>${close}</span></div>
+    <div class="row"><span class="lbl">Change</span><span class="${pctClass(change)}">${change>=0?'+':''}${change.toFixed(6)} (${fmtPct(changePct)})</span></div>
+    <div class="row"><span class="lbl">Open→High</span><span class="pos">${fmtPct(highPct)}</span></div>
+    <div class="row"><span class="lbl">Open→Low</span><span class="neg">${fmtPct(lowPct)}</span></div>
+  `;
+  tooltipEl.style.display = 'block';
+
+  const wrapRect = chartWrapEl.getBoundingClientRect();
+  let left = param.point.x + 16;
+  if(left + 190 > wrapRect.width) left = param.point.x - 190 - 10;
+  tooltipEl.style.left = Math.max(4, left) + 'px';
+  tooltipEl.style.top = '8px';
+});
 
 let cfgLoadedOnce = false;
 
