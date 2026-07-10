@@ -13,7 +13,7 @@ SETUP
 pip install ccxt flask pandas numpy python-dotenv gunicorn requests
 .env with: BINGX_API_KEY=... / BINGX_SECRET_KEY=...
 Run locally:   python labusdt_bot_bingx.py
-Run online:    gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT labusdt_bot_bingx:app
+Run online:    gunicorn --workers 1 --threads 4 --timeout 1200 --bind 0.0.0.0:$PORT labusdt_bot_bingx:app
 
 ⚠️ MUST stay at --workers 1 online. State + the trading loop live in one
 process's memory; more than one worker/instance means duplicate real orders
