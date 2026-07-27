@@ -208,6 +208,24 @@ def condition_signal(ind: dict, close: np.ndarray, idx: int, cfg: dict, use_ema:
     return raw_long, raw_short
 
 
+def condition1_signal(ind: dict, close: np.ndarray, idx: int, cfg: dict):
+    """เงื่อนไข 1: เหมือน condition_signal ทุกอย่าง แต่ถ้า 'Reversal จากระยะห่าง
+    EMA' เปิดอยู่ และราคาห่างจาก EMA เส้นที่สอง (c1_rev_ema_len) เกิน
+    c1_rev_pct% ให้สลับสัญญาณ Long<->Short (เทรดสวนกลับ)."""
+    base_long, base_short = condition_signal(ind, close, idx, cfg, cfg["c1_use_ema"], cfg["c1_ema_len"])
+
+    is_far = False
+    if cfg.get("c1_use_rev_dist"):
+        rev_ema = ema_series(close, cfg["c1_rev_ema_len"])
+        ref = rev_ema[idx]
+        dist = abs(close[idx] - ref) / ref if ref else 0.0
+        is_far = dist >= (cfg["c1_rev_pct"] / 100.0)
+
+    if is_far:
+        return base_short, base_long
+    return base_long, base_short
+
+
 def calc_entry_sl_tp(cfg: dict, is_long: bool, entry_price: float, last_bull_ob, last_bear_ob):
     if cfg["use_auto_tp_sl"]:
         if is_long:
@@ -249,6 +267,7 @@ DEFAULT_CONFIG = {
     "fix_sl_pct": 3.0,
 
     "c1_use_ema": False, "c1_ema_len": 150,
+    "c1_use_rev_dist": False, "c1_rev_ema_len": 50, "c1_rev_pct": 3.0,
     "c2_use_ema": True,  "c2_ema_len": 150,
     "c3_use_ema": True,  "c3_ema_len": 100,
 
@@ -594,7 +613,10 @@ def _loop():
                 # 2) ถ้ายังไม่มีไม้ค้าง + บอทถูก RUN + ถึงวันเริ่มเทรดแล้ว -> เช็คสัญญาณใหม่
                 cs = state.cond_state[condition]  # re-read after possible close above
                 if state.running and not cs["in_position"] and _is_trading_started(cfg):
-                    raw_long, raw_short = condition_signal(ind, close_arr, idx, cfg, use_ema, ema_len)
+                    if condition == "C1":
+                        raw_long, raw_short = condition1_signal(ind, close_arr, idx, cfg)
+                    else:
+                        raw_long, raw_short = condition_signal(ind, close_arr, idx, cfg, use_ema, ema_len)
 
                     dist_pct = cfg["min_dist_pct"] / 100.0
                     can_long = cs["last_long_entry"] is None or (abs(live_price - cs["last_long_entry"]) / cs["last_long_entry"] >= dist_pct)
@@ -776,6 +798,11 @@ INDEX_HTML = r"""<!doctype html>
       <div class="field"><label>เปิดใช้ EMA</label><select id="cfg_c1_use_ema"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
       <div class="field"><label>EMA Length</label><input id="cfg_c1_ema_len" type="number" step="1" /></div>
     </div>
+    <div class="field"><label>เปิดใช้ Reversal จากระยะห่าง EMA</label><select id="cfg_c1_use_rev_dist"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
+    <div class="row2">
+      <div class="field"><label>EMA วัดระยะห่าง (Length)</label><input id="cfg_c1_rev_ema_len" type="number" step="1" /></div>
+      <div class="field"><label>ระยะห่าง % ที่ให้สลับฝั่ง</label><input id="cfg_c1_rev_pct" type="number" step="0.1" /></div>
+    </div>
     <h2>เงื่อนไข 2 (EMA Filter)</h2>
     <div class="row2">
       <div class="field"><label>เปิดใช้ EMA</label><select id="cfg_c2_use_ema"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
@@ -838,7 +865,8 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 const CFG_KEYS = ["symbol","timeframe","leverage","bot_start_date","initial_cap","base_order_usdt","fee_pct",
   "min_dist_pct","use_rsi_div","rsi_len","rsi_ob","rsi_os","use_auto_tp_sl","fix_tp_pct","fix_sl_pct",
-  "c1_use_ema","c1_ema_len","c2_use_ema","c2_ema_len","c3_use_ema","c3_ema_len"];
+  "c1_use_ema","c1_ema_len","c1_use_rev_dist","c1_rev_ema_len","c1_rev_pct",
+  "c2_use_ema","c2_ema_len","c3_use_ema","c3_ema_len"];
 
 const priceChart = LightweightCharts.createChart(document.getElementById('priceChart'), {
   layout:{background:{color:'transparent'}, textColor:'#7C879C', fontFamily:'IBM Plex Mono'},
@@ -1002,8 +1030,9 @@ def api_status():
 def api_config():
     patch = request.get_json(force=True) or {}
     numeric_keys = {"leverage", "initial_cap", "base_order_usdt", "fee_pct", "min_dist_pct",
-                    "rsi_len", "rsi_ob", "rsi_os", "fix_tp_pct", "fix_sl_pct", "c1_ema_len", "c2_ema_len", "c3_ema_len"}
-    bool_keys = {"use_rsi_div", "use_auto_tp_sl", "c1_use_ema", "c2_use_ema", "c3_use_ema"}
+                    "rsi_len", "rsi_ob", "rsi_os", "fix_tp_pct", "fix_sl_pct", "c1_ema_len", "c2_ema_len", "c3_ema_len",
+                    "c1_rev_ema_len", "c1_rev_pct"}
+    bool_keys = {"use_rsi_div", "use_auto_tp_sl", "c1_use_ema", "c2_use_ema", "c3_use_ema", "c1_use_rev_dist"}
     string_keys = {"symbol", "timeframe", "bot_start_date"}
 
     clean = {}
