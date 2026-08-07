@@ -8,9 +8,19 @@ condition manages its own single open ticket (never re-enters itself while
 its own trade is open) but the 3 conditions never block each other — they
 can all be in a trade at the same time.
 
-Same deploy pattern as before: one file, one process, PORT from the
-environment, a background thread doing the work while a web server keeps
-the service alive/health-checkable online.
+>>> Symbol: BEAT/USDT:USDT (BingX USDT-margined perpetual futures, confirmed
+    listed as BEATUSDT on BingX Futures) <<<
+
+Default settings below match the screenshot supplied by the user:
+  - RSI(9), OB 65 / OS 25, "Use RSI Divergence Filter" ON
+  - Min distance from last entry: 2%
+  - TP/SL: Fix mode (Auto TP/SL unchecked), Fix TP 2%, Fix SL 2%
+  - Capital: 10 USDT initial, 1 USDT per order, leverage 25x (adjustable
+    from the dashboard — same as before), fee 0.04%
+  - เงื่อนไข 1 (C1): EMA Trend Filter OFF, EMA length 50 (unused while off)
+      Reversal-from-EMA-distance OFF, rev EMA length 100, rev distance 1%
+  - เงื่อนไข 2 (C2): EMA Trend Filter ON, EMA length 150
+  - เงื่อนไข 3 (C3): EMA Trend Filter ON, EMA length 100
 
 SETUP
 -----
@@ -249,7 +259,7 @@ def calc_entry_sl_tp(cfg: dict, is_long: bool, entry_price: float, last_bull_ob,
 # ============================================================================
 
 DEFAULT_CONFIG = {
-    "symbol": "LAB/USDT:USDT",
+    "symbol": "BEAT/USDT:USDT",
     "timeframe": "5m",
     "leverage": 25,
     "bot_start_date": datetime.now().strftime("%Y-%m-%d"),
@@ -260,14 +270,14 @@ DEFAULT_CONFIG = {
 
     "min_dist_pct": 2.0,
     "use_rsi_div": True,
-    "rsi_len": 9, "rsi_ob": 65, "rsi_os": 5,
+    "rsi_len": 9, "rsi_ob": 65, "rsi_os": 25,
 
     "use_auto_tp_sl": False,
-    "fix_tp_pct": 5.5,
-    "fix_sl_pct": 3.0,
+    "fix_tp_pct": 2.0,
+    "fix_sl_pct": 2.0,
 
-    "c1_use_ema": False, "c1_ema_len": 150,
-    "c1_use_rev_dist": False, "c1_rev_ema_len": 50, "c1_rev_pct": 3.0,
+    "c1_use_ema": False, "c1_ema_len": 50,
+    "c1_use_rev_dist": False, "c1_rev_ema_len": 100, "c1_rev_pct": 1.0,
     "c2_use_ema": True,  "c2_ema_len": 150,
     "c3_use_ema": True,  "c3_ema_len": 100,
 
@@ -666,7 +676,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>3-Condition Confluence Engine</title>
+<title>3-Condition Confluence Engine · BEATUSDT</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
