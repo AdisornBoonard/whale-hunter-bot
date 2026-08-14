@@ -163,6 +163,8 @@ DEFAULT_CONFIG = {
 
     "stop_when_blown": True,    # หยุดรันเมื่อพอร์ตติดลบ (Equity <= 0)
 
+    "paper_mode": True,         # โหมดสมุดทดลอง (Paper/Dry-run) — True = ไม่ยิงออเดอร์จริง, บันทึกผลจำลองเท่านั้น
+
     "poll_seconds": 10,
 }
 
@@ -297,32 +299,37 @@ def cfg_fee_notional(amount, entry_price):
 
 
 def fire_entry(symbol: str, side: str, entry_price: float, cfg: dict, manual=False):
-    """Opens a real market order + real TP/SL bracket orders."""
-    ex = get_exchange()
+    """Opens a position ticket. In LIVE mode this sends a real market order +
+    real TP/SL bracket orders. In PAPER mode (paper_mode=True) nothing is
+    sent to the exchange — the ticket is simulated at entry_price so it can
+    still be tracked, TP/SL-checked, and logged on the dashboard."""
+    paper = bool(cfg.get("paper_mode"))
     try:
         contract_amount = round(cfg["base_order_usdt"] / entry_price, 4)
         tp, sl = calc_tp_sl(cfg, side == "LONG", entry_price)
         tp = round(float(tp), 6)
         sl = round(float(sl), 6)
 
-        try:
-            ex.set_leverage(cfg["leverage"], symbol)
-        except Exception:
-            pass
+        if not paper:
+            ex = get_exchange()
+            try:
+                ex.set_leverage(cfg["leverage"], symbol)
+            except Exception:
+                pass
 
-        order_side = "buy" if side == "LONG" else "sell"
-        ex.create_order(symbol=symbol, type="market", side=order_side,
-                         amount=contract_amount, params={"positionSide": side})
-        try:
-            tp_sl_side = "sell" if side == "LONG" else "buy"
-            ex.create_order(symbol=symbol, type="TAKE_PROFIT_MARKET", side=tp_sl_side,
-                             amount=contract_amount,
-                             params={"positionSide": side, "stopPrice": tp, "workingType": "MARK_PRICE"})
-            ex.create_order(symbol=symbol, type="STOP_MARKET", side=tp_sl_side,
-                             amount=contract_amount,
-                             params={"positionSide": side, "stopPrice": sl, "workingType": "MARK_PRICE"})
-        except Exception:
-            pass
+            order_side = "buy" if side == "LONG" else "sell"
+            ex.create_order(symbol=symbol, type="market", side=order_side,
+                             amount=contract_amount, params={"positionSide": side})
+            try:
+                tp_sl_side = "sell" if side == "LONG" else "buy"
+                ex.create_order(symbol=symbol, type="TAKE_PROFIT_MARKET", side=tp_sl_side,
+                                 amount=contract_amount,
+                                 params={"positionSide": side, "stopPrice": tp, "workingType": "MARK_PRICE"})
+                ex.create_order(symbol=symbol, type="STOP_MARKET", side=tp_sl_side,
+                                 amount=contract_amount,
+                                 params={"positionSide": side, "stopPrice": sl, "workingType": "MARK_PRICE"})
+            except Exception:
+                pass
 
         with state.lock:
             state.pos["in_position"] = True
@@ -333,7 +340,7 @@ def fire_entry(symbol: str, side: str, entry_price: float, cfg: dict, manual=Fal
             state.pos["contract_amount"] = contract_amount
             state._save()
 
-        tag = " [MANUAL]" if manual else ""
+        tag = " [PAPER]" if paper else (" [MANUAL]" if manual else "")
         state.add_trade({
             "id": uuid.uuid4().hex[:10],
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -343,8 +350,8 @@ def fire_entry(symbol: str, side: str, entry_price: float, cfg: dict, manual=Fal
             "contract_amount": contract_amount,
             "pnl": None, "status": "OPEN", "side": side,
         })
-        state.add_log(f"ENTRY EXECUTED{tag}: {side} @ {entry_price} | TP {tp} / SL {sl}")
-        return True, "order sent"
+        state.add_log(f"{'PAPER ' if paper else ''}ENTRY {'SIMULATED' if paper else 'EXECUTED'}{'' if paper else tag}: {side} @ {entry_price} | TP {tp} / SL {sl}")
+        return True, "paper entry recorded" if paper else "order sent"
     except Exception as e:
         state.add_log(f"⚠️ ORDER FAILED ({side}): {e}")
         return False, str(e)
@@ -389,18 +396,20 @@ def close_ticket(exit_price: float, reason: str):
 
 
 def force_close_market(symbol: str):
-    """Used by the kill switch: actually flattens the real position too."""
+    """Used by the kill switch: flattens the real position too (skipped
+    entirely in paper mode — there is no real position to flatten)."""
     if not state.pos["in_position"]:
         return
-    ex = get_exchange()
-    side = state.pos["pos_side"]
-    amount = state.pos["contract_amount"]
-    close_side = "sell" if side == "LONG" else "buy"
-    try:
-        ex.create_order(symbol=symbol, type="market", side=close_side, amount=amount,
-                         params={"positionSide": side, "reduceOnly": True})
-    except Exception as e:
-        state.add_log(f"⚠️ Kill-switch close failed: {e}")
+    if not state.config.get("paper_mode"):
+        ex = get_exchange()
+        side = state.pos["pos_side"]
+        amount = state.pos["contract_amount"]
+        close_side = "sell" if side == "LONG" else "buy"
+        try:
+            ex.create_order(symbol=symbol, type="market", side=close_side, amount=amount,
+                             params={"positionSide": side, "reduceOnly": True})
+        except Exception as e:
+            state.add_log(f"⚠️ Kill-switch close failed: {e}")
     exit_price = state.live_price or state.pos["entry_price"]
     close_ticket(exit_price, "ACCOUNT BLOWN - STOPPED")
 
@@ -423,12 +432,17 @@ def close_trade_manual():
     symbol = cfg["symbol"]
     side = state.pos["pos_side"]
     amount = state.pos["contract_amount"]
+    exit_price = state.live_price or state.pos["entry_price"]
+
+    if cfg.get("paper_mode"):
+        close_ticket(exit_price, "MANUAL CLOSE (PAPER)")
+        return True, "closed (paper)"
+
     ex = get_exchange()
     close_side = "sell" if side == "LONG" else "buy"
     try:
         ex.create_order(symbol=symbol, type="market", side=close_side, amount=amount,
                          params={"positionSide": side, "reduceOnly": True})
-        exit_price = state.live_price or state.pos["entry_price"]
         close_ticket(exit_price, "MANUAL CLOSE")
         return True, "closed"
     except Exception as e:
@@ -465,11 +479,14 @@ def _loop():
             ohlcv_payload = df[["timestamp", "open", "high", "low", "close", "volume"]].values.tolist()
             state.update_market(ohlcv_payload, cci_snapshot, live_price)
 
-            try:
-                bal = ex.fetch_balance()
-                state.balance = float(bal.get("USDT", {}).get("total", 0.0))
-            except Exception:
-                pass
+            if cfg.get("paper_mode"):
+                state.balance = state.equity()  # simulated balance = ทุนเริ่มต้น + กำไร/ขาดทุนสะสม
+            else:
+                try:
+                    bal = ex.fetch_balance()
+                    state.balance = float(bal.get("USDT", {}).get("total", 0.0))
+                except Exception:
+                    pass
 
             # 1) Kill switch check FIRST — equity <= 0 halts everything
             if cfg["stop_when_blown"] and not state.bot_stopped and state.equity() <= 0:
@@ -630,7 +647,7 @@ INDEX_HTML = r"""<!doctype html>
 <div class="app">
   <div class="brand"><div class="mark">CCI</div><div><h1>CCI MULTI-TIMEFRAME BOT</h1><div class="sub" id="symbolLabel">LOADING…</div></div></div>
   <div class="topbar">
-    <div class="status-pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+    <div class="status-pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span><span class="badge" id="modeBadge" style="margin-left:10px">--</span></div>
     <div class="manual-group">
       <span class="status-pill">Balance <span class="mono price" id="balanceVal" style="margin-left:6px">--</span></span>
       <button class="manual-btn long" id="manualLongBtn">▲ LONG</button>
@@ -640,6 +657,11 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <div class="control">
+    <h2>โหมดการทำงาน</h2>
+    <div class="field"><label>โหมด</label>
+      <select id="cfg_paper_mode"><option value="true">📝 Paper (สมุดทด — ไม่ยิงออเดอร์จริง)</option><option value="false">🔴 Live (ยิงออเดอร์จริง)</option></select>
+    </div>
+
     <h2>เงินทุน / ค่าธรรมเนียม / ขนาดไม้</h2>
     <div class="field"><label>Symbol</label><input id="cfg_symbol" type="text" /></div>
     <div class="row2">
@@ -688,7 +710,7 @@ INDEX_HTML = r"""<!doctype html>
 
     <button class="save-btn" id="saveCfgBtn">SAVE SETTINGS</button>
     <button class="reset-btn" id="resetKillBtn">RESET KILL SWITCH</button>
-    <div class="warn">ออเดอร์เข้า/ออกอ้างอิงจาก CCI ของ TF หลัก ยืนยันด้วย CCI ของ TF ยืนยัน 1/2 (ถ้าเปิดใช้) — TP/SL เป็นออเดอร์จริงบน BingX ทุกไม้</div>
+    <div class="warn">ออเดอร์เข้า/ออกอ้างอิงจาก CCI ของ TF หลัก ยืนยันด้วย CCI ของ TF ยืนยัน 1/2 (ถ้าเปิดใช้) — โหมด Paper: บันทึกผลจำลองเท่านั้น ไม่ยิงออเดอร์จริง | โหมด Live: ส่งออเดอร์ + TP/SL จริงไปที่ BingX ทุกไม้</div>
   </div>
 
   <div class="main">
@@ -723,7 +745,7 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 const CFG_KEYS = ["symbol","main_timeframe","leverage","bot_start_date","initial_cap","base_order_usdt","fee_pct",
   "tf1_enable","tf1","tf2_enable","tf2","cci_len","ob_level","os_level",
-  "tp_pct","sl_pct","allow_long","allow_short","sl_first_if_both_hit","stop_when_blown"];
+  "tp_pct","sl_pct","allow_long","allow_short","sl_first_if_both_hit","stop_when_blown","paper_mode"];
 
 const priceChart = LightweightCharts.createChart(document.getElementById('priceChart'), {
   layout:{background:{color:'transparent'}, textColor:'#7C879C', fontFamily:'IBM Plex Mono'},
@@ -768,6 +790,9 @@ async function poll(){
 function render(data){
   document.getElementById('connDot').className = 'dot ' + (data.bot_stopped?'stopped':(data.connected?'on':''));
   document.getElementById('connText').textContent = data.bot_stopped ? 'STOPPED (พอร์ตแตก)' : (data.connected ? 'CONNECTED · BingX' : 'CONNECTING…');
+  const modeBadge = document.getElementById('modeBadge');
+  modeBadge.textContent = data.config.paper_mode ? '📝 PAPER MODE' : '🔴 LIVE';
+  modeBadge.className = 'badge ' + (data.config.paper_mode ? 'badge-open' : 'badge-loss');
   document.getElementById('symbolLabel').textContent = (data.config.symbol||'') + ' · ' + (data.config.main_timeframe||'');
   document.getElementById('livePrice').textContent = data.live_price ? ('$'+data.live_price) : '--';
   document.getElementById('balanceVal').textContent = '$' + (data.balance||0).toFixed(2);
@@ -832,14 +857,17 @@ function render(data){
   }
 }
 
+function isPaper(){ return document.getElementById('cfg_paper_mode').value === 'true'; }
 document.getElementById('manualLongBtn').addEventListener('click', async ()=>{
-  if(!confirm('เปิดออเดอร์ LONG ด้วยมือ ยิงจริงทันที แน่ใจไหม?')) return;
+  const msg = isPaper() ? 'บันทึกออเดอร์ LONG จำลอง (Paper) ตอนนี้เลยไหม?' : 'เปิดออเดอร์ LONG ด้วยมือ ยิงจริงทันที แน่ใจไหม?';
+  if(!confirm(msg)) return;
   const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({side:'LONG'})});
   const j = await res.json();
   if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: '+(j.message||j.error||'unknown error'));
 });
 document.getElementById('manualShortBtn').addEventListener('click', async ()=>{
-  if(!confirm('เปิดออเดอร์ SHORT ด้วยมือ ยิงจริงทันที แน่ใจไหม?')) return;
+  const msg = isPaper() ? 'บันทึกออเดอร์ SHORT จำลอง (Paper) ตอนนี้เลยไหม?' : 'เปิดออเดอร์ SHORT ด้วยมือ ยิงจริงทันที แน่ใจไหม?';
+  if(!confirm(msg)) return;
   const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({side:'SHORT'})});
   const j = await res.json();
   if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: '+(j.message||j.error||'unknown error'));
@@ -885,7 +913,7 @@ def api_config():
     patch = request.get_json(force=True) or {}
     numeric_keys = {"leverage", "initial_cap", "base_order_usdt", "fee_pct",
                     "cci_len", "ob_level", "os_level", "tp_pct", "sl_pct"}
-    bool_keys = {"tf1_enable", "tf2_enable", "allow_long", "allow_short", "sl_first_if_both_hit", "stop_when_blown"}
+    bool_keys = {"tf1_enable", "tf2_enable", "allow_long", "allow_short", "sl_first_if_both_hit", "stop_when_blown", "paper_mode"}
     string_keys = {"symbol", "main_timeframe", "tf1", "tf2", "bot_start_date"}
 
     clean = {}
