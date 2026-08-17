@@ -189,6 +189,7 @@ DEFAULT_CONFIG = {
     "paper_mode": True,         # โหมดสมุดทดลอง (Paper/Dry-run) — True = ไม่ยิงออเดอร์จริง, บันทึกผลจำลองเท่านั้น
 
     "poll_seconds": 10,
+    "candle_limit": 1440,       # จำนวนแท่งเทียน TF หลักที่ดึงมาคำนวณ CCI ต่อรอบ
 }
 
 
@@ -508,7 +509,7 @@ def _loop():
         try:
             symbol = cfg["symbol"]
             ex = get_exchange()
-            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["main_timeframe"], limit=max(300, cfg["cci_len"] + 100))
+            bars = ex.fetch_ohlcv(symbol, timeframe=cfg["main_timeframe"], limit=max(cfg["candle_limit"], cfg["cci_len"] + 100))
             df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
             high_arr = df["high"].values.astype(float)
             low_arr = df["low"].values.astype(float)
@@ -731,6 +732,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="field"><label>ค่าธรรมเนียม (% ของมูลค่าสัญญาจริง)</label><input id="cfg_fee_pct" type="number" step="0.01" /></div>
     </div>
     <div class="field"><label>วันเริ่มเทรด</label><input id="cfg_bot_start_date" type="date" /></div>
+    <div class="field"><label>จำนวนแท่งเทียนที่ดึงต่อรอบ (TF หลัก)</label><input id="cfg_candle_limit" type="number" step="1" /></div>
 
     <h2>รูปแบบการเทรด</h2>
     <div class="field"><label>เปิดใช้งานการเปิดไม้ซ้อน</label><select id="cfg_allow_multi"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
@@ -810,7 +812,7 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 
 <script>
-const CFG_KEYS = ["symbol","main_timeframe","bot_start_date","initial_cap","margin_usdt","leverage","fee_pct",
+const CFG_KEYS = ["symbol","main_timeframe","bot_start_date","candle_limit","initial_cap","margin_usdt","leverage","fee_pct",
   "allow_multi","max_trades_per_side",
   "tf1_enable","tf1","tf2_enable","tf2","cci_len","ob_level","os_level",
   "tp_pct","sl_pct","allow_long","allow_short","sl_first_if_both_hit","stop_when_blown","paper_mode"];
@@ -994,7 +996,7 @@ def api_status():
 def api_config():
     patch = request.get_json(force=True) or {}
     numeric_keys = {"leverage", "initial_cap", "margin_usdt", "fee_pct", "max_trades_per_side",
-                    "cci_len", "ob_level", "os_level", "tp_pct", "sl_pct"}
+                    "cci_len", "ob_level", "os_level", "tp_pct", "sl_pct", "candle_limit"}
     bool_keys = {"tf1_enable", "tf2_enable", "allow_long", "allow_short", "sl_first_if_both_hit",
                  "stop_when_blown", "paper_mode", "allow_multi"}
     string_keys = {"symbol", "main_timeframe", "tf1", "tf2", "bot_start_date"}
