@@ -212,6 +212,7 @@ class BotState:
         self.cci_snapshot = {"main": None, "tf1": None, "tf2": None}
         self.live_price = None
         self.balance = 0.0
+        self.last_signal_bar_ts = None  # timestamp of the last CLOSED main-TF candle whose entry signal was already evaluated — prevents re-firing the same signal every poll while that candle is still forming
         self._load()
 
     def _load(self):
@@ -576,13 +577,21 @@ def _loop():
                             state.add_log(f"⚠️ Auto-close order failed for ticket {t['id']}: {e}")
                     close_ticket_by_id(t["id"], exit_price, reason)
 
-            # 3) Look for a new entry if running, past the start date, and slot available
-            if (not state.bot_stopped and state.running and _is_trading_started(cfg) and idx > 0):
+            # 3) Look for a new entry — but only ONCE per closed candle. Without this
+            # guard, the same closed bar (idx) keeps producing the same
+            # long_condition/short_condition True on every poll while that candle is
+            # still forming, which fires duplicate tickets in the same candle.
+            bar_ts = int(df["timestamp"].iloc[idx]) if idx >= 0 else None
+            is_new_bar = bar_ts is not None and bar_ts != state.last_signal_bar_ts
+
+            if (not state.bot_stopped and state.running and _is_trading_started(cfg)
+                    and idx > 0 and is_new_bar):
                 long_condition, short_condition = compute_signals(cci_main, idx, cfg, cci_tf1_last, cci_tf2_last)
                 if long_condition and can_open("LONG", cfg):
                     open_ticket(symbol, "LONG", live_price, cfg)
                 elif short_condition and can_open("SHORT", cfg):
                     open_ticket(symbol, "SHORT", live_price, cfg)
+                state.last_signal_bar_ts = bar_ts
 
         except Exception as ex_err:
             state.connected = False
