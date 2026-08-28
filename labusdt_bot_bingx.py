@@ -34,6 +34,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 import ccxt
 
@@ -115,7 +116,7 @@ log = logging.getLogger("WhaleHunter")
 def compute_cci(df: pd.DataFrame, length: int) -> pd.Series:
     tp = (df["high"] + df["low"] + df["close"]) / 3.0
     sma = tp.rolling(length).mean()
-    mean_dev = tp.rolling(length).apply(lambda x: (x - x.mean()).abs().mean(), raw=True)
+    mean_dev = tp.rolling(length).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
     return (tp - sma) / (0.015 * mean_dev)
 
 
