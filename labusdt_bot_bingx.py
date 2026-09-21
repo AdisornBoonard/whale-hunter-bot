@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# Whale Hunter Bot — Dual Timeframe (3m + 5m independent engines)
+# Whale Hunter Bot — Multi-Timeframe (1m + 3m + 5m independent engines)
 # ------------------------------------------------------------------------------
 # แปลงเงื่อนไขจากอินดิเกเตอร์ Pine Script "Whale Hunter V10 - Real Fee & Growth
 # (No Repaint)" มาเป็นบอทเทรดจริงด้วย Python + ccxt
@@ -11,7 +11,7 @@
 #   - Short: CCI(20) ตัดลงผ่าน -100 และ close < EMA(200)  และ CCI ปัจจุบัน < -100
 #   - เช็คสัญญาณจากแท่งที่ "ปิดแล้ว" เท่านั้น (No Repaint เหมือนต้นฉบับที่ใช้ [1])
 #
-# จุดสำคัญตามที่ขอ: บอทนี้ "เฝ้ามอง 2 timeframe พร้อมกัน" คือ 3 นาที และ 5 นาที
+# จุดสำคัญตามที่ขอ: บอทนี้ "เฝ้ามอง 3 timeframe พร้อมกัน" คือ 1 นาที, 3 นาที และ 5 นาที
 # โดยใช้เงื่อนไขเข้าไม้ชุดเดียวกันทั้งคู่ (ไม่ใช่การ confirm ข้าม TF แบบบอทก่อนหน้า)
 # แต่ทำงานเป็น "เอนจินอิสระ 2 ชุด" — แต่ละ TF มีของตัวเองแยกกันโดยสิ้นเชิง:
 #   - TP / SL (%) แยกกัน
@@ -72,6 +72,16 @@ SHARED_CONFIG = {
 
 # พารามิเตอร์ที่ "แยกกันคนละ TF" ตามที่ขอ: TP/SL, Leverage, มาร์จิ้น, จำนวนไม้สูงสุด
 TF_CONFIGS = {
+    "1m": {
+        "TIMEFRAME": "1m",
+        "BASE_MARGIN_USD": 1.0,
+        "DAILY_ADD_USD": 1.0,
+        "LEVERAGE": 20.0,
+        "FEE_PERCENT": 0.04,
+        "MAX_TRADES": 3,
+        "TP_PERCENT": 3.0,
+        "SL_PERCENT": 5.0,
+    },
     "3m": {
         "TIMEFRAME": "3m",
         "BASE_MARGIN_USD": 1.0,            # เงินต้นเริ่มต้นต่อไม้
@@ -205,6 +215,16 @@ def build_exchange() -> ccxt.Exchange:
         exchange.set_sandbox_mode(True)
         log.info("เปิดใช้งาน Testnet/Sandbox mode")
 
+    exchange.load_markets()  # จำเป็นเพื่อให้รู้ precision/lot size/min notional ของ symbol ที่ตั้งไว้
+    if SHARED_CONFIG["SYMBOL"] not in exchange.markets:
+        log.error(f"ไม่พบ symbol '{SHARED_CONFIG['SYMBOL']}' บน {SHARED_CONFIG['EXCHANGE_ID']} "
+                  f"(MARKET_TYPE={SHARED_CONFIG['MARKET_TYPE']}) — ตรวจชื่อคู่เหรียญให้ตรงกับที่ exchange ใช้")
+        sys.exit(1)
+    market = exchange.markets[SHARED_CONFIG["SYMBOL"]]
+    log.info(f"โหลด market สำเร็จ: {SHARED_CONFIG['SYMBOL']} | "
+             f"min amount={market.get('limits', {}).get('amount', {}).get('min')} | "
+             f"min cost={market.get('limits', {}).get('cost', {}).get('min')}")
+
     if not SHARED_CONFIG["DRY_RUN"] and SHARED_CONFIG["MARKET_TYPE"] == "future":
         for tf_name, cfg in TF_CONFIGS.items():
             try:
@@ -228,6 +248,31 @@ def fetch_ohlcv_df(exchange: ccxt.Exchange, symbol: str, timeframe: str, limit: 
 
 def fee_usd(notional_usd: float, fee_percent: float) -> float:
     return notional_usd * fee_percent / 100.0
+
+
+def safe_qty(exchange: ccxt.Exchange, symbol: str, raw_qty: float, price: float) -> float | None:
+    """
+    ปัดจำนวนหน่วยให้ตรงกับ precision/lot size จริงของ symbol นั้นๆ บน exchange
+    (สำคัญมากเวลาสลับเหรียญ เช่น จาก BTC/USDT:USDT ไป LINK/USDT:USDT เพราะ step size
+    และ min notional ต่างกันคนละเรื่องเลย) คืนค่า None ถ้าต่ำกว่าขั้นต่ำที่ exchange กำหนด
+    """
+    try:
+        qty = float(exchange.amount_to_precision(symbol, raw_qty))
+    except Exception as e:
+        log.warning(f"ปัด precision ไม่สำเร็จ ({symbol}): {e} — ใช้ค่าดิบแทน")
+        qty = raw_qty
+
+    market = exchange.markets.get(symbol, {})
+    min_amount = (market.get("limits", {}) or {}).get("amount", {}).get("min")
+    min_cost = (market.get("limits", {}) or {}).get("cost", {}).get("min")
+
+    if min_amount is not None and qty < min_amount:
+        log.warning(f"[{symbol}] จำนวน {qty} ต่ำกว่าขั้นต่ำของ exchange ({min_amount}) — ข้ามออเดอร์นี้")
+        return None
+    if min_cost is not None and (qty * price) < min_cost:
+        log.warning(f"[{symbol}] มูลค่าออเดอร์ {qty * price:.4f} ต่ำกว่าขั้นต่ำ ({min_cost}) — ข้ามออเดอร์นี้")
+        return None
+    return qty
 
 
 def place_order(exchange: ccxt.Exchange, side: str, qty_units: float, symbol: str) -> dict | None:
@@ -376,7 +421,12 @@ def try_open_positions(engine: TFEngine, state: AccountState, exchange: ccxt.Exc
     leverage = engine.cfg["LEVERAGE"]
     notional = margin * leverage
     price = signals["open"] if "open" in signals else signals["close"]
-    qty_units = notional / price
+    raw_qty = notional / price
+
+    qty_units = raw_qty if SHARED_CONFIG["DRY_RUN"] else safe_qty(exchange, symbol, raw_qty, price)
+    if qty_units is None:
+        return  # ต่ำกว่าขั้นต่ำที่ exchange กำหนดสำหรับ symbol นี้ (เช่น หลัง margin เปลี่ยนเหรียญ)
+
     side = 1 if signals["long_signal"] else -1
 
     order = place_order(exchange, "buy" if side == 1 else "sell", qty_units, symbol)
@@ -455,7 +505,7 @@ def print_dashboard(engines: dict, state: AccountState, last_prices: dict) -> No
     status = "STOPPED (พอร์ตแตก)" if state.stopped else "RUNNING"
 
     lines = [
-        "┌── WHALE HUNTER DASHBOARD (3m + 5m) ─────────────────────────",
+        "┌── WHALE HUNTER DASHBOARD (1m + 3m + 5m) ────────────────────",
         f"│ สถานะบอท          : {status}",
         f"│ ทุนเริ่มต้น         : {SHARED_CONFIG['START_CAPITAL_USD']:.2f} USD",
         f"│ Equity รวม (Realized): {state.equity:.4f} USD",
