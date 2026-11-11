@@ -1,88 +1,45 @@
 """
-whale_hunter_bot.py
-------------------------
-Single-file drop-in bot for BingX Futures — trades the
-"Whale Hunter V10 - Real Fee & Growth (No Repaint)" Pine Script logic,
-run as THREE FULLY INDEPENDENT STRATEGY INSTANCES in parallel: one on the
-1-minute timeframe, one on the 3-minute timeframe, and one on the
-5-minute timeframe.
+cci_5pair_bot.py
+-----------------
+Single-file drop-in bot for BingX Futures — trades the Pine Script
+"CCI Divergence Entry Signal [Winrate Backtest Dashboard]".
 
-WHALE HUNTER ENTRY LOGIC (per timeframe, identical rule set, applied
-independently to that timeframe's own candles):
-  - Volume spike:  volume > SMA(volume, vol_ma_len) * vol_mult
-  - CCI (on CLOSE, not typical price): cci_len period
-  - Trend filter:  EMA(close, ema_len)
-  - Long  = volume spike AND cci > ob_level AND close > ema AND
-            cci crosses OVER ob_level
-  - Short = volume spike AND cci < os_level AND close < ema AND
-            cci crosses UNDER os_level
-  - NO-REPAINT: exactly like the Pine script's `nz(sig_raw[1], false)`,
-    the raw condition is evaluated on a fully closed candle, then the
-    bot only acts on it one candle later (once that raw-signal candle
-    itself is confirmed closed) — see compute_whale_indicators() /
-    the `raw_long[idx-1]` lookups in the engine loop.
-
-THREE INDEPENDENT TIMEFRAMES ("1m", "3m", "5m"):
-  - Each timeframe has its OWN enable switch, its OWN indicator
-    parameters (CCI length, OB/OS level, volume MA length/multiplier,
-    EMA length), its OWN margin-per-order, its OWN TP % / SL %, and its
-    OWN max-simultaneous-tickets-per-side — completely separate from
-    the other two timeframes. A 1m ticket's TP/SL/exit is judged
-    purely against 1m candles, a 3m ticket's purely against 3m
-    candles, a 5m ticket's purely against 5m candles. Ticket slots
-    (max_trades_per_side) are also counted separately per timeframe,
-    so one timeframe filling its quota never blocks the others from
-    opening.
-  - Fee %, Leverage, initial capital, and the kill switch are shared
-    account-level settings (there is only one real BingX account/
-    position), everything else above is per-timeframe.
-
-⚠️ REAL-EXCHANGE CAVEAT for Live mode: BingX only knows "symbol +
-positionSide" — it has NO concept of "ticket" or "timeframe". If two or
-all three of the 1m/3m/5m strategies are simultaneously holding, say,
-LONG tickets on the same symbol, BingX merges ALL of them (across
-timeframes, plus any multi-trade stacking within one timeframe) into
-ONE real position. Each ticket still gets its own real TP/SL bracket
-order sized to its own contract amount for real money-management
-protection, but the dashboard's per-ticket / per-timeframe win-loss
-bookkeeping is done in SOFTWARE (checking each ticket's own TP/SL
-against its OWN timeframe's latest closed candle), exactly like the
-Pine script does with high/low. Attribution between simultaneously-open
-tickets (whether same-TF stacked or cross-TF) can be imprecise at the
-edges; the money-management (bracket orders) is still real and correct
-either way.
+  * 5 independent coin-pair slots (P1..P5). EVERY slot has its own full set of
+    settings (symbol, timeframe, leverage, EMA filter, CCI, divergence pivots,
+    TP/SL, fee, compound/margin ...).
+  * Each slot has an ENABLE checkbox (only enabled slots are traded).
+  * Each slot has a REVERSE (เทรดสวน) checkbox: when ticked, a BUY signal opens
+    a SELL and a SELL signal opens a BUY — per slot.
+  * One open ticket per slot at a time (same as the Pine `in_trade` flag).
+    Slots never block each other.
 
 SETUP
 -----
 pip install ccxt flask pandas numpy python-dotenv gunicorn requests
 .env with: BINGX_API_KEY=... / BINGX_SECRET_KEY=...
-Run locally:   python whale_hunter_bot.py
-Run online:    gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT whale_hunter_bot:app
+Run locally:   python cci_5pair_bot.py
+Run online:    gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT cci_5pair_bot:app
 
-⚠️ MUST stay at --workers 1 online. State + the trading loop live in one
-process's memory; more than one worker/instance means duplicate real orders
-firing on the same signal.
+!! MUST stay at --workers 1 online. State + the trading loop live in one
+process's memory; more than one worker/instance means duplicate real orders.
 
-DEFAULT PARAMETERS
----------------------------------------------------------------
-  ทุนเริ่มต้น (USD): 10          Leverage: 20x
-  ค่าธรรมเนียม: 0.04% ของมูลค่าสัญญาจริง ต่อฝั่ง
-  หยุดเปิดไม้ใหม่เมื่อพอร์ตติดลบ (Equity <= 0): เปิด
-  โหมด: Paper (ไม่ยิงออเดอร์จริง) ตั้งต้น
-
-  ทั้ง TF 1 นาที / 3 นาที / 5 นาที (ค่าเริ่มต้นเหมือนกัน แต่ปรับแยกอิสระได้):
-    เปิดใช้งาน: เปิด        มูลค่ามาร์จิ้นต่อไม้: $1
-    เปิดใช้งานการเปิดไม้ซ้อน: เปิด   จำนวนไม้เปิดพร้อมกันสูงสุดต่อฝั่ง: 3
-    CCI Length: 20   Overbought: 100   Oversold: -100
-    Volume MA Length: 20   Volume Multiplier: 2.0x
-    EMA Length: 200
-    Take Profit: 3%   Stop Loss: 5%
-    อนุญาตเปิด Long / Short: เปิดทั้งคู่
-    ถ้า TP และ SL ถูกแตะในแท่งเดียวกัน ให้นับ SL ก่อน: เปิด
+NOTES
+-----
+* Do not give two enabled slots the SAME symbol — BingX would merge them into
+  one real position. The dashboard warns you if you do.
+* Signals are evaluated once per CLOSED candle (like the Pine script on bar
+  close). After you press RUN, the bot "arms" on the current closed candle and
+  only acts on signals from candles that close AFTER that.
+* Equity / win-rate / fees on the dashboard are SIMULATED the same way the
+  Pine dashboard does it (TP hit = +notional*TP%, SL hit = -notional*SL%,
+  minus fees). Real money management is done by the real TP/SL bracket orders
+  placed on BingX with every entry.
 """
 
 import os
 import json
+import math
+import copy
 import threading
 import uuid
 from datetime import datetime
@@ -97,195 +54,252 @@ load_dotenv()
 BINGX_API_KEY = os.getenv("BINGX_API_KEY")
 BINGX_SECRET_KEY = os.getenv("BINGX_SECRET_KEY")
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state_cci.json")
 
-TF_KEYS = ["1m", "3m", "5m"]
-TF_LABELS_PY = {"1m": "TF 1 นาที", "3m": "TF 3 นาที", "5m": "TF 5 นาที"}
+PAIR_IDS = ["P1", "P2", "P3", "P4", "P5"]
+TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}
 
 # ============================================================================
-# 1) INDICATOR - Python port of the "Whale Hunter V10" Pine Script logic
+# 1) INDICATOR - Python port of the Pine Script (CCI regular divergence)
 # ============================================================================
 
-def cci_close_series(close: pd.Series, length: int) -> np.ndarray:
-    """Matches Pine's ta.cci(close, length): CCI computed directly on the
-    `close` source (NOT typical price like a classic CCI):
-        cci = (close - SMA(close,len)) / (0.015 * mean_abs_dev(close,len))
-    """
-    sma = close.rolling(length).mean()
-    mad = close.rolling(length).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+def shift_by(arr: np.ndarray, right: int, fill=np.nan):
+    """result[i] = arr[i-right], mirrors Pine's `[right]` lookback."""
+    n = len(arr)
+    if arr.dtype == bool:
+        out = np.zeros(n, dtype=bool)
+        if right < n:
+            out[right:] = arr[: n - right]
+        return out
+    out = np.full(n, fill)
+    if right < n:
+        out[right:] = arr[: n - right]
+    return out
+
+
+def value_when(cond: np.ndarray, source: np.ndarray, occurrence: int):
+    """Python port of ta.valuewhen(cond, source, occurrence)."""
+    n = len(cond)
+    out = np.full(n, np.nan)
+    hist = []
+    for i in range(n):
+        if cond[i]:
+            hist.append(source[i])
+        if len(hist) > occurrence:
+            out[i] = hist[-1 - occurrence]
+    return out
+
+
+def bars_since(cond: np.ndarray):
+    """Python port of ta.barssince(cond) (NaN until cond was true once)."""
+    n = len(cond)
+    out = np.full(n, np.nan)
+    last = -1
+    for i in range(n):
+        if cond[i]:
+            last = i
+        if last >= 0:
+            out[i] = i - last
+    return out
+
+
+def ema_series(close: np.ndarray, length: int) -> np.ndarray:
+    return pd.Series(close).ewm(span=length, adjust=False).mean().values
+
+
+def cci_series(src: np.ndarray, length: int) -> np.ndarray:
+    """Pine ta.cci: (src - sma) / (0.015 * mean-absolute-deviation)."""
+    s = pd.Series(src)
+    sma = s.rolling(length).mean()
+    dev = s.rolling(length).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
     with np.errstate(divide="ignore", invalid="ignore"):
-        cci = (close - sma) / (0.015 * mad)
-    return cci.values.astype(float)
+        cci = (s - sma) / (0.015 * dev)
+    return cci.replace([np.inf, -np.inf], np.nan).values
 
 
-def compute_whale_indicators(df: pd.DataFrame, tf_cfg: dict) -> dict:
-    """Reproduces is_w / c_val / e_200 / l_sig_raw / s_sig_raw from the
-    Whale Hunter Pine script, vectorized over the whole candle history."""
-    close = df["close"]
-    volume = df["volume"]
-
-    vol_ma = volume.rolling(tf_cfg["vol_ma_len"]).mean().values
-    is_whale = (volume.values.astype(float) > (vol_ma * tf_cfg["vol_mult"]))
-
-    cci = cci_close_series(close, tf_cfg["cci_len"])
-    ema = close.ewm(span=tf_cfg["ema_len"], adjust=False).mean().values
-    close_arr = close.values.astype(float)
-
-    ob = tf_cfg["ob_level"]
-    os_ = tf_cfg["os_level"]
-    n = len(df)
-    raw_long = np.zeros(n, dtype=bool)
-    raw_short = np.zeros(n, dtype=bool)
-
-    for i in range(1, n):
-        if np.isnan(cci[i]) or np.isnan(cci[i - 1]) or np.isnan(ema[i]) or np.isnan(vol_ma[i]):
+def pivots(values: np.ndarray, left: int, right: int):
+    """ta.pivothigh / ta.pivotlow flags at the pivot bar itself."""
+    n = len(values)
+    is_high = np.zeros(n, dtype=bool)
+    is_low = np.zeros(n, dtype=bool)
+    for j in range(left, n - right):
+        w = values[j - left: j + right + 1]
+        if np.isnan(w).any():
             continue
-        cross_up = cci[i - 1] <= ob and cci[i] > ob
-        cross_dn = cci[i - 1] >= os_ and cci[i] < os_
-        raw_long[i] = bool(is_whale[i] and cci[i] > ob and close_arr[i] > ema[i] and cross_up)
-        raw_short[i] = bool(is_whale[i] and cci[i] < os_ and close_arr[i] < ema[i] and cross_dn)
-
-    return {
-        "cci": cci, "ema": ema, "vol_ma": vol_ma, "is_whale": is_whale,
-        "raw_long": raw_long, "raw_short": raw_short,
-    }
+        v = values[j]
+        if v == w.max():
+            is_high[j] = True
+        if v == w.min():
+            is_low[j] = True
+    return is_high, is_low
 
 
-def compute_whale_signals(ind: dict, idx: int, tf_cfg: dict):
-    """No-repaint action: mirrors Pine's `l_sig = nz(l_sig_raw[1], false)`.
-    The raw cross must have been confirmed on the PREVIOUS closed candle
-    (idx-1); we act on it now that idx itself has also fully closed."""
-    if idx <= 0 or idx - 1 < 0:
-        return False, False
-    raw_long_prev = bool(ind["raw_long"][idx - 1])
-    raw_short_prev = bool(ind["raw_short"][idx - 1])
-    long_condition = tf_cfg["allow_long"] and raw_long_prev
-    short_condition = tf_cfg["allow_short"] and raw_short_prev
-    return long_condition, short_condition
+def compute_pair_signals(df: pd.DataFrame, p: dict) -> dict:
+    """Full port of sections 2-5 of the Pine script for ONE pair's settings.
+    Returns arrays aligned with df rows: buy / sell (signal at bar i, i.e. the
+    bar on which the pivot gets confirmed, exactly like Pine)."""
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    close = df["close"].values.astype(float)
+    lbL, lbR = int(p["lbL"]), int(p["lbR"])
 
+    osc = cci_series(close, int(p["cci_len"]))
+    is_high, is_low = pivots(osc, lbL, lbR)
+    pl = shift_by(is_low, lbR)      # plFound  (pivot confirmed at this bar)
+    ph = shift_by(is_high, lbR)     # phFound
+    osc_s = shift_by(osc, lbR)      # osc[lbR]
+    low_s = shift_by(low, lbR)      # low[lbR]
+    high_s = shift_by(high, lbR)    # high[lbR]
 
-def calc_tp_sl(tf_cfg: dict, is_long: bool, entry_price: float):
-    if is_long:
-        tp = entry_price * (1 + tf_cfg["tp_pct"] / 100.0)
-        sl = entry_price * (1 - tf_cfg["sl_pct"] / 100.0)
+    def in_range(cond_prev):
+        bs = bars_since(cond_prev)
+        with np.errstate(invalid="ignore"):
+            return (bs >= p["range_lower"]) & (bs <= p["range_upper"])
+
+    with np.errstate(invalid="ignore"):
+        # Bullish: price Lower Low, CCI Higher Low
+        osc_hl = (osc_s > value_when(pl, osc_s, 1)) & in_range(shift_by(pl, 1))
+        price_ll = low_s < value_when(pl, low_s, 1)
+        bull_all = pl & osc_hl & price_ll
+        # Bearish: price Higher High, CCI Lower High
+        osc_lh = (osc_s < value_when(ph, osc_s, 1)) & in_range(shift_by(ph, 1))
+        price_hh = high_s > value_when(ph, high_s, 1)
+        bear_all = ph & osc_lh & price_hh
+
+        if p["use_ob_os"]:
+            bull = bull_all & (osc_s <= p["os_level"])
+            bear = bear_all & (osc_s >= p["ob_level"])
+        else:
+            bull, bear = bull_all, bear_all
+
+    ema = ema_series(close, int(p["ema_len"]))
+    if p["use_ema"]:
+        up = close > ema
+        dn = close < ema
     else:
-        tp = entry_price * (1 - tf_cfg["tp_pct"] / 100.0)
-        sl = entry_price * (1 + tf_cfg["sl_pct"] / 100.0)
-    return tp, sl
+        up = np.ones(len(close), dtype=bool)
+        dn = np.ones(len(close), dtype=bool)
 
-
-def fee_usd(notional_value: float, fee_pct: float) -> float:
-    return notional_value * fee_pct / 100.0
+    return {"osc": osc, "ema": ema,
+            "buy": np.asarray(bull & up, dtype=bool),
+            "sell": np.asarray(bear & dn, dtype=bool)}
 
 
 # ============================================================================
-# 2) SHARED STATE
+# 2) CONFIG + SHARED STATE
 # ============================================================================
 
-def _default_tf_settings():
+def default_pair(symbol, enabled=False):
     return {
-        "enabled": True,
-        "margin_usdt": 1.0,
-        "allow_multi": True,
-        "max_trades_per_side": 3,
-        "cci_len": 20,
-        "ob_level": 100,
-        "os_level": -100,
-        "vol_ma_len": 20,
-        "vol_mult": 2.0,
-        "ema_len": 200,
-        "tp_pct": 3.0,
-        "sl_pct": 5.0,
-        "allow_long": True,
-        "allow_short": True,
-        "sl_first_if_both_hit": True,
+        "enabled": enabled, "reverse": False,
+        "symbol": symbol, "timeframe": "5m", "leverage": 25,
+        # Trend filter
+        "use_ema": True, "ema_len": 200,
+        # CCI
+        "cci_len": 20, "ob_level": 100.0, "os_level": -100.0, "use_ob_os": True,
+        # Divergence
+        "lbL": 5, "lbR": 5, "range_upper": 60, "range_lower": 5,
+        # Risk
+        "tp_pct": 3.0, "sl_pct": 1.5, "fee_pct": 0.1,
+        # Compound / margin
+        "initial_cap": 10.0, "use_compound": True, "compound_rate": 3.0,
+        "fixed_margin_usdt": 0.0,   # >0 = use this fixed margin per trade instead of compound formula
     }
 
 
-DEFAULT_CONFIG = {
-    "symbol": "BEAT/USDT:USDT",
-    "bot_start_date": datetime.now().strftime("%Y-%m-%d"),
-
-    "initial_cap": 10.0,     # ทุนเริ่มต้น (USD) - account-level
-    "leverage": 20,          # Leverage (เท่า) - account-level, shared by all 3 TFs
-    "fee_pct": 0.04,         # ค่าธรรมเนียม (% ของมูลค่าสัญญาจริง ต่อฝั่ง) - account-level
-
-    "stop_when_blown": True,  # หยุดเปิดไม้ใหม่เมื่อพอร์ตติดลบ (Equity <= 0) - account-level
-    "paper_mode": True,       # โหมดสมุดทดลอง (Paper/Dry-run)
-
-    "chart_tf": "5m",         # which TF's candles are drawn on the price chart (display only)
+DEFAULT_GLOBAL = {
     "poll_seconds": 10,
-    "candle_limit": 400,      # bars fetched per TF per poll (must cover ema_len of that TF)
-
-    "tf_settings": {
-        "1m": _default_tf_settings(),
-        "3m": _default_tf_settings(),
-        "5m": _default_tf_settings(),
-    },
+    "position_mode": "hedge",   # "hedge" (Long/Short) or "oneway"
+    "bot_start_date": datetime.now().strftime("%Y-%m-%d"),
 }
 
+DEFAULT_PAIRS = {
+    "P1": default_pair("BEAT/USDT:USDT", enabled=True),
+    "P2": default_pair("BTC/USDT:USDT"),
+    "P3": default_pair("ETH/USDT:USDT"),
+    "P4": default_pair("SOL/USDT:USDT"),
+    "P5": default_pair("XRP/USDT:USDT"),
+}
 
-def empty_stats():
-    return {"total_trades": 0, "wins": 0, "losses": 0, "net_profit": 0.0}
+PAIR_SCHEMA = {
+    "enabled": "bool", "reverse": "bool", "symbol": "str", "timeframe": "str", "leverage": "int",
+    "use_ema": "bool", "ema_len": "int",
+    "cci_len": "int", "ob_level": "float", "os_level": "float", "use_ob_os": "bool",
+    "lbL": "int", "lbR": "int", "range_upper": "int", "range_lower": "int",
+    "tp_pct": "float", "sl_pct": "float", "fee_pct": "float",
+    "initial_cap": "float", "use_compound": "bool", "compound_rate": "float", "fixed_margin_usdt": "float",
+}
+GLOBAL_SCHEMA = {"poll_seconds": "int", "position_mode": "str", "bot_start_date": "str"}
+
+PAIR_MIN = {"leverage": 1, "ema_len": 1, "cci_len": 2, "lbL": 1, "lbR": 1, "range_lower": 1, "range_upper": 2,
+            "tp_pct": 0.01, "sl_pct": 0.01, "fee_pct": 0.0, "initial_cap": 0.01, "compound_rate": 0.0,
+            "fixed_margin_usdt": 0.0}
+PAIR_MAX = {"leverage": 125}
+
+
+def empty_pair_state(initial_cap):
+    return {
+        "in_position": False, "pos_side": None, "signal_side": None, "reversed": False,
+        "entry_price": None, "tp": None, "sl": None,
+        "amount": None, "margin": None, "notional": None, "open_fee": 0.0,
+        "entry_candle_ts": None, "bracket_ids": [], "brackets_ok": True,
+        "last_checked_ts": None, "last_day": None, "daily_margin": None,
+        "total_trades": 0, "wins": 0, "losses": 0, "total_fees": 0.0,
+        "equity": initial_cap, "start_equity": initial_cap,
+    }
 
 
 class BotState:
     def __init__(self):
         self.lock = threading.RLock()
-        self.config = json.loads(json.dumps(DEFAULT_CONFIG))
-        self.tickets = []          # open tickets: list of dicts, each has "tf": "1m"|"3m"|"5m"
-        self.stats = empty_stats()  # account-level cumulative stats (all TFs combined)
-        self.bot_stopped = False   # kill switch latch (equity <= 0)
+        self.config = {"global": dict(DEFAULT_GLOBAL),
+                       "pairs": {pid: dict(DEFAULT_PAIRS[pid]) for pid in PAIR_IDS}}
+        self.pair_state = {pid: empty_pair_state(self.config["pairs"][pid]["initial_cap"]) for pid in PAIR_IDS}
+        self.order_locks = {pid: threading.Lock() for pid in PAIR_IDS}
         self.running = False
         self.connected = False
-        self.trades = []           # closed/open trade log rows, each has "tf"
+        self.trades = []
         self.logs = []
-        self.market = {tf: {"ohlcv": [], "cci": None, "ema": None, "vol_ratio": None} for tf in TF_KEYS}
-        self.live_price = None
+        self.market = {}
         self.balance = 0.0
-        self.last_signal_bar_ts = {tf: None for tf in TF_KEYS}  # per-TF new-bar guard
         self._load()
 
     def _load(self):
-        if os.path.exists(STATE_FILE):
-            try:
-                with open(STATE_FILE, "r") as f:
-                    data = json.load(f)
-                cfg = data.get("config", {})
-                # merge nested tf_settings safely so old state files / new keys don't crash
-                tfset = cfg.pop("tf_settings", {})
-                self.config.update(cfg)
-                for tf in TF_KEYS:
-                    self.config["tf_settings"][tf].update(tfset.get(tf, {}))
-                self.tickets = data.get("tickets", [])
-                self.stats.update(data.get("stats", {}))
-                self.bot_stopped = data.get("bot_stopped", False)
-                self.trades = data.get("trades", [])
-                self.logs = data.get("logs", [])
-                lsbt = data.get("last_signal_bar_ts", {})
-                for tf in TF_KEYS:
-                    self.last_signal_bar_ts[tf] = lsbt.get(tf)
-            except Exception:
-                pass
-
-    def _save(self):
+        if not os.path.exists(STATE_FILE):
+            return
         try:
-            with open(STATE_FILE, "w") as f:
-                json.dump({
-                    "config": self.config, "tickets": self.tickets, "stats": self.stats,
-                    "bot_stopped": self.bot_stopped,
-                    "trades": self.trades[:500], "logs": self.logs[-300:],
-                    "last_signal_bar_ts": self.last_signal_bar_ts,
-                }, f)
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+            saved_cfg = data.get("config", {})
+            self.config["global"].update({k: v for k, v in saved_cfg.get("global", {}).items() if k in GLOBAL_SCHEMA})
+            for pid in PAIR_IDS:
+                saved = saved_cfg.get("pairs", {}).get(pid, {})
+                self.config["pairs"][pid].update({k: v for k, v in saved.items() if k in PAIR_SCHEMA})
+                self.pair_state[pid].update(data.get("pair_state", {}).get(pid, {}))
+            self.trades = data.get("trades", [])
+            self.logs = data.get("logs", [])
         except Exception:
             pass
 
-    def update_config(self, patch_global: dict, patch_tf: dict):
+    def _save(self):
+        try:
+            tmp = STATE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"config": self.config, "pair_state": self.pair_state,
+                           "trades": self.trades[:500], "logs": self.logs[-300:]}, f)
+            os.replace(tmp, STATE_FILE)
+        except Exception:
+            pass
+
+    def get_config(self):
         with self.lock:
-            self.config.update(patch_global)
-            for tf, sub in patch_tf.items():
-                if tf in self.config["tf_settings"]:
-                    self.config["tf_settings"][tf].update(sub)
+            return copy.deepcopy(self.config)
+
+    def apply_patch(self, g_patch: dict, pair_patch: dict):
+        with self.lock:
+            self.config["global"].update(g_patch)
+            for pid, kv in pair_patch.items():
+                self.config["pairs"][pid].update(kv)
             self._save()
 
     def add_log(self, text: str):
@@ -300,80 +314,60 @@ class BotState:
             self.trades = self.trades[:500]
             self._save()
 
-    def update_market(self, tf: str, ohlcv, cci_val, ema_val, vol_ratio):
+    def set_market(self, pid, m):
         with self.lock:
-            self.market[tf] = {"ohlcv": ohlcv, "cci": cci_val, "ema": ema_val, "vol_ratio": vol_ratio}
+            self.market[pid] = m
 
-    def count_tf_side(self, tf: str, side: str) -> int:
-        return sum(1 for t in self.tickets if t["tf"] == tf and t["side"] == side)
-
-    def count_tf(self, tf: str) -> int:
-        return sum(1 for t in self.tickets if t["tf"] == tf)
-
-    def equity(self):
-        return round(self.config["initial_cap"] + self.stats["net_profit"], 6)
-
-    def open_mark_value(self):
-        """Unrealized mark-to-market PnL of ALL open tickets (all TFs) at
-        the single shared live_price (same symbol, one real market price)."""
-        if not self.tickets or not self.live_price:
-            return 0.0
-        px = self.live_price
-        total = 0.0
-        for t in self.tickets:
-            if t["side"] == "LONG":
-                total += (px - t["entry_price"]) * t["contract_amount"]
-            else:
-                total += (t["entry_price"] - px) * t["contract_amount"]
-        return round(total, 6)
-
-    def tf_stats(self):
-        """Derive per-timeframe win/loss/net-profit breakdown from the trade log."""
-        out = {}
-        for tf in TF_KEYS:
-            wins = losses = 0
-            net = 0.0
-            for row in self.trades:
-                if row.get("tf") != tf or row.get("status") not in ("WIN", "LOSS"):
-                    continue
-                if row["status"] == "WIN":
-                    wins += 1
-                else:
-                    losses += 1
-                net += row.get("pnl") or 0.0
-            total = wins + losses
-            out[tf] = {
-                "total_trades": total, "wins": wins, "losses": losses,
-                "net_profit": round(net, 6),
-                "winrate": round((wins / total) * 100, 2) if total else 0.0,
-                "open_long": self.count_tf_side(tf, "LONG"),
-                "open_short": self.count_tf_side(tf, "SHORT"),
-            }
-        return out
-
-    def snapshot(self):
+    def set_market_error(self, pid, msg):
         with self.lock:
-            equity = self.equity()
-            unrealized_equity = round(equity + self.open_mark_value(), 6)
-            winrate = round((self.stats["wins"] / self.stats["total_trades"]) * 100, 2) if self.stats["total_trades"] else 0.0
-            net_pct = round((self.stats["net_profit"] / self.config["initial_cap"]) * 100, 2) if self.config["initial_cap"] else 0.0
+            m = self.market.get(pid, {})
+            m["status"] = "error"
+            m["error"] = msg
+            self.market[pid] = m
+
+    def snapshot(self, chart_pair="P1"):
+        with self.lock:
+            pairs_out = {}
+            for pid in PAIR_IDS:
+                ps = dict(self.pair_state[pid])
+                w, l = ps["wins"], ps["losses"]
+                ps["win_rate"] = round(w / (w + l) * 100, 1) if (w + l) else 0.0
+                ps["net_profit"] = round(ps["equity"] - ps["start_equity"], 4)
+                ps["equity"] = round(ps["equity"], 4)
+                ps["total_fees"] = round(ps["total_fees"], 4)
+                m = self.market.get(pid, {})
+                ps["live_price"] = m.get("live_price")
+                ps["osc"] = m.get("osc_last")
+                ps["status"] = m.get("status", "idle")
+                ps["error"] = m.get("error")
+                pairs_out[pid] = ps
+
+            tot = sum(p["total_trades"] for p in pairs_out.values())
+            wins = sum(p["wins"] for p in pairs_out.values())
+            losses = sum(p["losses"] for p in pairs_out.values())
+            net = sum(p["net_profit"] for p in pairs_out.values())
+            fees = sum(p["total_fees"] for p in pairs_out.values())
+            equity = sum(p["equity"] for p in pairs_out.values())
+
+            cm = self.market.get(chart_pair, {})
             return {
-                "config": json.loads(json.dumps(self.config)),
-                "tickets": list(self.tickets),
-                "stats": dict(self.stats),
-                "tf_stats": self.tf_stats(),
-                "bot_stopped": self.bot_stopped,
+                "config": copy.deepcopy(self.config),
+                "pairs": pairs_out,
                 "running": self.running,
                 "connected": self.connected,
-                "live_price": self.live_price,
                 "balance": self.balance,
-                "equity": equity,
-                "unrealized_equity": unrealized_equity,
-                "winrate": winrate,
-                "net_pct": net_pct,
-                "market": self.market,
+                "combined": {
+                    "total_trades": tot, "wins": wins, "losses": losses,
+                    "win_rate": round(wins / (wins + losses) * 100, 1) if (wins + losses) else 0.0,
+                    "net_profit": round(net, 4), "fees": round(fees, 4), "equity": round(equity, 4),
+                },
                 "trades": self.trades[:80],
                 "logs": self.logs[-100:],
+                "chart_pair": chart_pair,
+                "chart": {
+                    "ohlcv": cm.get("ohlcv", []), "ema": cm.get("ema", []),
+                    "buy_ts": cm.get("buy_ts", []), "sell_ts": cm.get("sell_ts", []),
+                },
             }
 
 
@@ -384,320 +378,442 @@ state = BotState()
 # ============================================================================
 
 _exchange = None
+_markets_loaded = False
+_ex_lock = threading.Lock()
 _stop_flag = threading.Event()
 _thread = None
 
 
 def get_exchange():
     global _exchange
-    if _exchange is None:
-        _exchange = ccxt.bingx({
-            "apiKey": BINGX_API_KEY, "secret": BINGX_SECRET_KEY,
-            "enableRateLimit": True, "timeout": 15000,
-            "options": {"defaultType": "swap"},
-        })
-    return _exchange
+    with _ex_lock:
+        if _exchange is None:
+            _exchange = ccxt.bingx({
+                "apiKey": BINGX_API_KEY, "secret": BINGX_SECRET_KEY,
+                "enableRateLimit": True, "timeout": 15000,
+                "options": {"defaultType": "swap"},
+            })
+        return _exchange
 
 
-def _is_trading_started(cfg: dict) -> bool:
+def ensure_markets(ex):
+    global _markets_loaded
+    with _ex_lock:
+        if not _markets_loaded:
+            ex.load_markets()
+            _markets_loaded = True
+
+
+def normalize_symbol(raw: str) -> str:
+    """BEATUSDT / BEAT-USDT / BEAT/USDT  ->  BEAT/USDT:USDT (ccxt swap symbol)."""
+    s = (raw or "").strip().upper().replace(" ", "")
+    if not s or ":" in s:
+        return s
+    if "/" in s:
+        base, quote = s.split("/", 1)
+        return f"{base}/{quote}:{quote}"
+    if "-" in s:
+        base, quote = s.split("-", 1)
+        return f"{base}/{quote}:{quote}"
+    for q in ("USDT", "USDC"):
+        if s.endswith(q) and len(s) > len(q):
+            return f"{s[:-len(q)]}/{q}:{q}"
+    return s
+
+
+def verify_symbol(sym: str):
+    """Returns (True,'') if the symbol is a real BingX swap market,
+    (False,msg) if it is not, (None,msg) if it could not be verified."""
+    if not sym:
+        return False, "Symbol is empty"
     try:
-        start_dt = datetime.strptime(cfg.get("bot_start_date", ""), "%Y-%m-%d").date()
+        ex = get_exchange()
+        ensure_markets(ex)
+    except Exception as e:
+        return None, f"Could not verify {sym} against BingX ({type(e).__name__}); saved unverified."
+    mk = ex.markets.get(sym)
+    if mk and mk.get("swap"):
+        return True, ""
+    base = sym.split("/")[0]
+    sugg = [s for s, m in ex.markets.items() if m.get("swap") and s.endswith(":USDT") and base in s.split("/")[0]][:6]
+    hint = (" Similar: " + ", ".join(sugg)) if sugg else ""
+    return False, f"Symbol {sym} was not found on BingX USDT futures.{hint}"
+
+
+def _is_trading_started(g: dict) -> bool:
+    try:
+        start_dt = datetime.strptime(g.get("bot_start_date", ""), "%Y-%m-%d").date()
     except Exception:
         return True
     return datetime.now().date() >= start_dt
 
 
-def can_open(tf: str, side: str, tf_cfg: dict) -> bool:
-    if tf_cfg["allow_multi"]:
-        return state.count_tf_side(tf, side) < tf_cfg["max_trades_per_side"]
-    return state.count_tf(tf) == 0
+def _pos_side_param(g: dict, side: str) -> str:
+    return side if g.get("position_mode", "hedge") == "hedge" else "BOTH"
 
 
-def open_ticket(symbol: str, tf: str, side: str, entry_price: float, cfg: dict, tf_cfg: dict, manual=False):
-    """Opens one ticket tagged to timeframe `tf`. margin x leverage = notional
-    (margin is per-TF, leverage is account-level); contract units =
-    notional / entry_price. Entry fee is deducted from net_profit immediately."""
-    paper = bool(cfg.get("paper_mode"))
+def _order_params(g: dict, side: str, extra=None, closing=False) -> dict:
+    params = {"positionSide": _pos_side_param(g, side)}
+    if closing and g.get("position_mode", "hedge") != "hedge":
+        params["reduceOnly"] = True
+    if extra:
+        params.update(extra)
+    return params
+
+
+def _fmt_price(ex, symbol, price):
     try:
-        notional = tf_cfg["margin_usdt"] * cfg["leverage"]
-        contract_amount = round(notional / entry_price, 4)
-        tp, sl = calc_tp_sl(tf_cfg, side == "LONG", entry_price)
-        tp = round(float(tp), 6)
-        sl = round(float(sl), 6)
-        entry_fee = fee_usd(notional, cfg["fee_pct"])
+        return float(ex.price_to_precision(symbol, price))
+    except Exception:
+        return float(f"{price:.8g}")
 
-        if not paper:
-            ex = get_exchange()
-            try:
-                ex.set_leverage(cfg["leverage"], symbol)
-            except Exception:
-                pass
-            order_side = "buy" if side == "LONG" else "sell"
-            ex.create_order(symbol=symbol, type="market", side=order_side,
-                             amount=contract_amount, params={"positionSide": side})
-            try:
-                tp_sl_side = "sell" if side == "LONG" else "buy"
-                ex.create_order(symbol=symbol, type="TAKE_PROFIT_MARKET", side=tp_sl_side,
-                                 amount=contract_amount,
-                                 params={"positionSide": side, "stopPrice": tp, "workingType": "MARK_PRICE"})
-                ex.create_order(symbol=symbol, type="STOP_MARKET", side=tp_sl_side,
-                                 amount=contract_amount,
-                                 params={"positionSide": side, "stopPrice": sl, "workingType": "MARK_PRICE"})
-            except Exception:
-                pass
 
-        ticket_id = uuid.uuid4().hex[:10]
-        with state.lock:
-            state.tickets.append({
-                "id": ticket_id, "tf": tf, "side": side, "entry_price": entry_price,
-                "tp": tp, "sl": sl, "contract_amount": contract_amount,
-                "notional": notional, "opened_ms": int(datetime.now().timestamp() * 1000),
-            })
-            state.stats["net_profit"] = round(state.stats["net_profit"] - entry_fee, 6)
+def roll_day(pid):
+    """Pine: on a new day daily_margin = (equity if compound else initial_cap) * rate%."""
+    cfg = state.config["pairs"][pid]
+    ps = state.pair_state[pid]
+    today = datetime.now().strftime("%Y-%m-%d")
+    with state.lock:
+        if ps.get("last_day") != today or ps.get("daily_margin") is None:
+            ps["last_day"] = today
+            base = ps["equity"] if cfg["use_compound"] else cfg["initial_cap"]
+            dm = base * cfg["compound_rate"] / 100.0
+            if dm <= 0:
+                dm = cfg["initial_cap"] * cfg["compound_rate"] / 100.0
+            ps["daily_margin"] = dm
             state._save()
 
-        tag = " [PAPER]" if paper else (" [MANUAL]" if manual else "")
-        state.add_trade({
-            "id": ticket_id, "tf": tf,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "entry_ms": int(datetime.now().timestamp() * 1000),
-            "type": f"OPEN ({'BUY' if side == 'LONG' else 'SELL'}) {tf} Whale{tag}",
-            "entry": entry_price, "tp": tp, "sl": sl,
-            "contract_amount": contract_amount, "notional": notional,
-            "pnl": None, "status": "OPEN", "side": side,
-        })
-        state.add_log(f"{'PAPER ' if paper else ''}ENTRY {'SIMULATED' if paper else 'EXECUTED'}{tag} [{tf}]: "
-                       f"{side} @ {entry_price} | notional ${notional:.2f} | TP {tp} / SL {sl} | entry fee ${entry_fee:.4f}")
-        return True, ticket_id
-    except Exception as e:
-        state.add_log(f"⚠️ ORDER FAILED [{tf}] ({side}): {e}")
-        return False, str(e)
+
+def current_margin(pid) -> float:
+    cfg = state.config["pairs"][pid]
+    if cfg["fixed_margin_usdt"] > 0:
+        return float(cfg["fixed_margin_usdt"])
+    return float(state.pair_state[pid]["daily_margin"] or 0.0)
 
 
-def close_ticket_by_id(ticket_id: str, exit_price: float, reason: str):
-    """Software-side bookkeeping close — records realized PnL for one ticket
-    (using the ACCOUNT-level fee_pct, since fees are charged by the real
-    exchange the same way regardless of which TF strategy opened it) and
-    removes it from the open list. In LIVE mode the caller is responsible
-    for sending the real reduceOnly close order first."""
-    with state.lock:
-        idx = next((i for i, t in enumerate(state.tickets) if t["id"] == ticket_id), None)
-        if idx is None:
-            return
-        t = state.tickets.pop(idx)
-        entry = t["entry_price"]
-        amount = t["contract_amount"]
-        side = t["side"]
-        gross_pnl = (exit_price - entry) * amount if side == "LONG" else (entry - exit_price) * amount
-        exit_fee = fee_usd(amount * exit_price, state.config["fee_pct"])
-        net_pnl = gross_pnl - exit_fee
-
-        state.stats["total_trades"] += 1
-        if net_pnl > 0:
-            state.stats["wins"] += 1
-        else:
-            state.stats["losses"] += 1
-        state.stats["net_profit"] = round(state.stats["net_profit"] + net_pnl, 6)
-
-        for row in state.trades:
-            if row.get("id") == ticket_id and row.get("status") == "OPEN":
-                row["status"] = "WIN" if net_pnl > 0 else "LOSS"
-                row["exit"] = exit_price
-                row["exit_ms"] = int(datetime.now().timestamp() * 1000)
-                row["pnl"] = round(net_pnl, 4)
-                break
-        state._save()
-
-    state.add_log(f"Ticket {ticket_id} [{t['tf']}] closed ({reason}) {side} @ ~{exit_price} | net PnL {round(net_pnl, 4)} USDT")
-
-
-def close_all_tickets_kill_switch(symbol: str):
-    """Kill switch: flattens every open ticket across ALL timeframes,
-    grouped by side so at most one real close order per side is sent in
-    LIVE mode (mirrors how BingX merges same-side tickets — regardless of
-    which TF opened them — into a single real position)."""
-    if not state.tickets:
+def cancel_brackets(symbol, ids):
+    if not ids:
         return
-    px = state.live_price or state.tickets[0]["entry_price"]
-    paper = bool(state.config.get("paper_mode"))
-
-    if not paper:
-        ex = get_exchange()
-        for side in ("LONG", "SHORT"):
-            side_tickets = [t for t in state.tickets if t["side"] == side]
-            if not side_tickets:
-                continue
-            total_amount = round(sum(t["contract_amount"] for t in side_tickets), 4)
-            close_side = "sell" if side == "LONG" else "buy"
-            try:
-                ex.create_order(symbol=symbol, type="market", side=close_side, amount=total_amount,
-                                 params={"positionSide": side, "reduceOnly": True})
-            except Exception as e:
-                state.add_log(f"⚠️ Kill-switch close failed ({side}): {e}")
-
-    for t in list(state.tickets):
-        close_ticket_by_id(t["id"], px, "ACCOUNT BLOWN - STOPPED")
-
-
-def open_trade_manual(tf: str, side: str):
-    snap_cfg = state.snapshot()["config"]
-    if tf not in TF_KEYS:
-        return False, "invalid timeframe"
-    tf_cfg = snap_cfg["tf_settings"][tf]
-    if state.bot_stopped:
-        return False, "Bot is stopped (equity <= 0)"
-    if not state.live_price:
-        return False, "No live price yet"
-    if not can_open(tf, side, tf_cfg):
-        return False, f"Max trades reached for {tf} {side}" if tf_cfg["allow_multi"] else f"A {tf} ticket is already open"
-    ok, msg = open_ticket(snap_cfg["symbol"], tf, side, state.live_price, snap_cfg, tf_cfg, manual=True)
-    return ok, msg
-
-
-def close_trade_manual(ticket_id: str):
-    t = next((t for t in state.tickets if t["id"] == ticket_id), None)
-    if t is None:
-        return False, "Ticket not found"
-    cfg = state.snapshot()["config"]
-    exit_price = state.live_price or t["entry_price"]
-
-    if cfg.get("paper_mode"):
-        close_ticket_by_id(ticket_id, exit_price, "MANUAL CLOSE (PAPER)")
-        return True, "closed (paper)"
-
     ex = get_exchange()
-    close_side = "sell" if t["side"] == "LONG" else "buy"
+    for oid in ids:
+        try:
+            ex.cancel_order(oid, symbol)
+        except Exception:
+            pass  # already filled / already gone
+
+
+def fire_entry(pid, side, price, manual=False, signal_side=None, reversed_flag=False):
+    """Open a real market order for this slot + real TP/SL bracket orders."""
+    lk = state.order_locks[pid]
+    if not lk.acquire(blocking=False):
+        return False, "another order action for this slot is in progress"
     try:
-        ex.create_order(symbol=cfg["symbol"], type="market", side=close_side, amount=t["contract_amount"],
-                         params={"positionSide": t["side"], "reduceOnly": True})
-        close_ticket_by_id(ticket_id, exit_price, "MANUAL CLOSE")
-        return True, "closed"
-    except Exception as e:
-        state.add_log(f"⚠️ Manual close failed: {e}")
-        return False, str(e)
+        cfg = state.get_config()
+        g, p = cfg["global"], cfg["pairs"][pid]
+        symbol = p["symbol"]
+        ps = state.pair_state[pid]
+        with state.lock:
+            if ps["in_position"]:
+                return False, f"{pid} already has an open ticket"
+        roll_day(pid)
+        ex = get_exchange()
+        try:
+            ensure_markets(ex)
+            leverage = int(p["leverage"])
+            margin = current_margin(pid)
+            if margin <= 0:
+                raise ValueError("margin per trade is 0 (check compound rate / fixed margin)")
+            amount = float(ex.amount_to_precision(symbol, margin * leverage / price))
+            if amount <= 0:
+                raise ValueError("order amount rounds to 0 — increase margin or leverage")
+            mk = ex.markets.get(symbol) or {}
+            min_amt = ((mk.get("limits") or {}).get("amount") or {}).get("min")
+            if min_amt and amount < min_amt:
+                raise ValueError(f"amount {amount} is below exchange minimum {min_amt} — increase margin/leverage")
+            notional = amount * price
+            is_long = side == "LONG"
+            if is_long:
+                sl = price * (1 - p["sl_pct"] / 100.0)
+                tp = price * (1 + p["tp_pct"] / 100.0)
+            else:
+                sl = price * (1 + p["sl_pct"] / 100.0)
+                tp = price * (1 - p["tp_pct"] / 100.0)
+            sl = _fmt_price(ex, symbol, sl)
+            tp = _fmt_price(ex, symbol, tp)
+
+            try:
+                ex.set_leverage(leverage, symbol, params={"side": _pos_side_param(g, side)})
+            except Exception as e:
+                state.add_log(f"⚠️ [{pid}] set_leverage warning: {e}")
+
+            ex.create_order(symbol=symbol, type="market", side="buy" if is_long else "sell",
+                            amount=amount, params=_order_params(g, side))
+
+            close_side = "sell" if is_long else "buy"
+            bracket_ids, brackets_ok = [], True
+            for typ, trig in (("TAKE_PROFIT_MARKET", tp), ("STOP_MARKET", sl)):
+                try:
+                    o = ex.create_order(symbol=symbol, type=typ, side=close_side, amount=amount,
+                                        params=_order_params(g, side, {"stopPrice": trig, "workingType": "MARK_PRICE"},
+                                                             closing=True))
+                    if o and o.get("id"):
+                        bracket_ids.append(str(o["id"]))
+                except Exception as be:
+                    brackets_ok = False
+                    state.add_log(f"🚨 [{pid}] {typ} bracket FAILED: {be} — bot will close this ticket itself when TP/SL is reached")
+
+            open_fee = notional * p["fee_pct"] / 100.0 / 2.0
+            last_ts = (state.market.get(pid) or {}).get("last_ts") or int(datetime.now().timestamp() * 1000)
+            with state.lock:
+                ps.update({
+                    "in_position": True, "pos_side": side, "signal_side": signal_side or side,
+                    "reversed": bool(reversed_flag), "entry_price": price, "tp": tp, "sl": sl,
+                    "amount": amount, "margin": margin, "notional": notional, "open_fee": open_fee,
+                    "entry_candle_ts": int(last_ts), "bracket_ids": bracket_ids, "brackets_ok": brackets_ok,
+                })
+                ps["equity"] -= open_fee
+                ps["total_fees"] += open_fee
+                state._save()
+
+            tag = " [MANUAL]" if manual else ""
+            rv = " ↺" if reversed_flag else ""
+            state.add_trade({
+                "id": uuid.uuid4().hex[:10], "pair": pid, "symbol": symbol,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "entry_ms": int(datetime.now().timestamp() * 1000),
+                "type": f"OPEN ({'BUY' if is_long else 'SELL'}) {pid}{rv}{tag}",
+                "entry": price, "tp": tp, "sl": sl, "amount": amount,
+                "pnl": None, "status": "OPEN", "side": side, "reversed": bool(reversed_flag),
+            })
+            state.add_log(f"[{pid}] ENTRY{tag}: {side}{' (reverse of ' + str(signal_side) + ' signal)' if reversed_flag else ''} "
+                          f"{symbol} @ {price} | margin {round(margin, 4)} x{leverage} | TP {tp} / SL {sl}")
+            return True, "order sent"
+        except Exception as e:
+            state.add_log(f"⚠️ [{pid}] ORDER FAILED ({side}): {e}")
+            return False, str(e)
+    finally:
+        lk.release()
 
 
-def _process_timeframe(ex, symbol: str, tf: str, cfg: dict):
-    """Fully independent per-timeframe cycle: fetch candles, compute Whale
-    Hunter indicators for THIS timeframe only, manage THIS timeframe's own
-    open tickets against THIS timeframe's own candles, and look for a new
-    entry using THIS timeframe's own signal/TP/SL/ticket-slot settings."""
-    tf_cfg = cfg["tf_settings"][tf]
-    if not tf_cfg["enabled"]:
+def close_ticket(pid, exit_price, reason, result):
+    """Bookkeeping close (result = TP / SL / MANUAL). Mirrors the Pine backtest
+    math: TP = +notional*TP%, SL = -notional*SL%, minus the closing fee."""
+    ps = state.pair_state[pid]
+    p = state.config["pairs"][pid]
+    with state.lock:
+        if not ps["in_position"]:
+            return
+        entry = ps["entry_price"] or 0.0
+        side = ps["pos_side"]
+        notional = ps["notional"] or 0.0
+        open_fee = ps["open_fee"] or 0.0
+        close_fee = notional * p["fee_pct"] / 100.0 / 2.0
+        if result == "TP":
+            gross = notional * p["tp_pct"] / 100.0
+        elif result == "SL":
+            gross = -notional * p["sl_pct"] / 100.0
+        else:
+            move = ((exit_price - entry) / entry) if side == "LONG" else ((entry - exit_price) / entry)
+            gross = notional * move
+        pnl = gross - close_fee
+        net_trade = gross - close_fee - open_fee
+        ps["equity"] += pnl
+        ps["total_fees"] += close_fee
+        ps["total_trades"] += 1
+        is_win = (result == "TP") or (result == "MANUAL" and net_trade > 0)
+        if is_win:
+            ps["wins"] += 1
+        else:
+            ps["losses"] += 1
+        for t in state.trades:
+            if t.get("pair") == pid and t.get("status") == "OPEN":
+                t["status"] = "WIN" if is_win else "LOSS"
+                t["exit"] = exit_price
+                t["exit_ms"] = int(datetime.now().timestamp() * 1000)
+                t["pnl"] = round(net_trade, 4)
+                t["reason"] = reason
+                break
+        ids = list(ps.get("bracket_ids") or [])
+        ps.update({"in_position": False, "pos_side": None, "signal_side": None, "reversed": False,
+                   "entry_price": None, "tp": None, "sl": None, "amount": None, "margin": None,
+                   "notional": None, "open_fee": 0.0, "entry_candle_ts": None, "bracket_ids": [],
+                   "brackets_ok": True})
+        state._save()
+    cancel_brackets(p["symbol"], ids)   # remove the leftover bracket order(s)
+    state.add_log(f"[{pid}] Position closed ({reason}) @ ~{exit_price} | trade PnL {round(net_trade, 4)} USDT")
+
+
+def exchange_close_position(pid):
+    cfg = state.get_config()
+    g, p = cfg["global"], cfg["pairs"][pid]
+    ps = state.pair_state[pid]
+    side, amount = ps["pos_side"], ps["amount"]
+    ex = get_exchange()
+    ex.create_order(symbol=p["symbol"], type="market", side="sell" if side == "LONG" else "buy",
+                    amount=amount, params=_order_params(g, side, closing=True))
+
+
+def software_exit(pid, exit_price, result):
+    ps = state.pair_state[pid]
+    if not ps.get("brackets_ok", True):
+        # no real TP/SL on the exchange for this ticket -> we must close it ourselves
+        try:
+            exchange_close_position(pid)
+        except Exception as e:
+            state.add_log(f"⚠️ [{pid}] could not close on exchange ({result}): {e} — will retry")
+            return
+    close_ticket(pid, exit_price, result, result)
+
+
+def check_exit(pid, ts_arr, high_arr, low_arr, live_price):
+    """Check this slot's TP/SL against every candle AFTER the entry candle,
+    then against the live price (Pine order: TP first for longs / shorts)."""
+    ps = state.pair_state[pid]
+    if not ps["in_position"]:
         return
+    entry_ts = ps.get("entry_candle_ts") or 0
+    tp, sl, side = ps["tp"], ps["sl"], ps["pos_side"]
+    for i in range(len(ts_arr)):
+        if ts_arr[i] <= entry_ts:
+            continue
+        hi, lo = high_arr[i], low_arr[i]
+        if side == "LONG":
+            if hi >= tp:
+                return software_exit(pid, tp, "TP")
+            if lo <= sl:
+                return software_exit(pid, sl, "SL")
+        else:
+            if lo <= tp:
+                return software_exit(pid, tp, "TP")
+            if hi >= sl:
+                return software_exit(pid, sl, "SL")
+    if side == "LONG":
+        if live_price >= tp:
+            return software_exit(pid, tp, "TP")
+        if live_price <= sl:
+            return software_exit(pid, sl, "SL")
+    else:
+        if live_price <= tp:
+            return software_exit(pid, tp, "TP")
+        if live_price >= sl:
+            return software_exit(pid, sl, "SL")
 
-    needed = max(tf_cfg["ema_len"] + 50, tf_cfg["cci_len"] + 50, tf_cfg["vol_ma_len"] + 50, cfg["candle_limit"])
-    bars = ex.fetch_ohlcv(symbol, timeframe=tf, limit=needed)
+
+def open_trade_manual(pid, side):
+    m = state.market.get(pid) or {}
+    live_price = m.get("live_price")
+    if not live_price:
+        return False, "No live price yet for this slot (enable it and wait for data)"
+    return fire_entry(pid, side, live_price, manual=True)
+
+
+def close_trade_manual(pid):
+    ps = state.pair_state[pid]
+    if not ps["in_position"]:
+        return False, "No open ticket for this slot"
+    lk = state.order_locks[pid]
+    if not lk.acquire(blocking=False):
+        return False, "another order action for this slot is in progress"
+    try:
+        try:
+            exchange_close_position(pid)
+        except Exception as e:
+            state.add_log(f"⚠️ [{pid}] Manual close failed: {e}")
+            return False, str(e)
+        exit_price = (state.market.get(pid) or {}).get("live_price") or ps["entry_price"]
+        close_ticket(pid, exit_price, "MANUAL CLOSE", "MANUAL")
+        return True, "closed"
+    finally:
+        lk.release()
+
+
+def process_pair(pid, cfg, ex):
+    g, p = cfg["global"], cfg["pairs"][pid]
+    symbol = p["symbol"]
+    ps = state.pair_state[pid]
+
+    bars = ex.fetch_ohlcv(symbol, timeframe=p["timeframe"], limit=500)
+    if not bars or len(bars) < 60:
+        raise RuntimeError(f"not enough candles returned ({len(bars) if bars else 0})")
     df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    ts_arr = df["timestamp"].values.astype("int64")
     high_arr = df["high"].values.astype(float)
     low_arr = df["low"].values.astype(float)
+    close_arr = df["close"].values.astype(float)
+    live_price = float(close_arr[-1])
+    idx = len(df) - 2  # last CLOSED candle
 
-    ind = compute_whale_indicators(df, tf_cfg)
-    idx = len(df) - 2  # last CLOSED candle on THIS timeframe
+    sig = compute_pair_signals(df, p)
+    osc_last = sig["osc"][idx]
+    state.set_market(pid, {
+        "ohlcv": df[["timestamp", "open", "high", "low", "close", "volume"]].values.tolist(),
+        "ema": [float(x) for x in sig["ema"]] if p["use_ema"] else [],
+        "buy_ts": [int(t) for t in ts_arr[sig["buy"]]],
+        "sell_ts": [int(t) for t in ts_arr[sig["sell"]]],
+        "live_price": live_price,
+        "osc_last": None if np.isnan(osc_last) else round(float(osc_last), 2),
+        "last_ts": int(ts_arr[-1]),
+        "status": "ok", "error": None,
+    })
 
-    cci_val = None if idx < 0 or np.isnan(ind["cci"][idx]) else round(float(ind["cci"][idx]), 2)
-    ema_val = None if idx < 0 or np.isnan(ind["ema"][idx]) else round(float(ind["ema"][idx]), 4)
-    vol_ratio = None
-    if idx >= 0 and not np.isnan(ind["vol_ma"][idx]) and ind["vol_ma"][idx] > 0:
-        vol_ratio = round(float(df["volume"].values[idx]) / float(ind["vol_ma"][idx]), 2)
+    check_exit(pid, ts_arr, high_arr, low_arr, live_price)
+    roll_day(pid)
 
-    ohlcv_payload = df[["timestamp", "open", "high", "low", "close", "volume"]].values.tolist()
-    state.update_market(tf, ohlcv_payload, cci_val, ema_val, vol_ratio)
-
-    # 1) Manage this timeframe's own open tickets against this timeframe's own last closed candle
-    if not state.bot_stopped and idx >= 0:
-        hi, lo = high_arr[idx], low_arr[idx]
-        my_tickets = [t for t in state.tickets if t["tf"] == tf]
-        for t in my_tickets:
-            side, tp, sl = t["side"], t["tp"], t["sl"]
-            if side == "LONG":
-                hit_tp, hit_sl = hi >= tp, lo <= sl
-            else:
-                hit_tp, hit_sl = lo <= tp, hi >= sl
-
-            if hit_tp and hit_sl:
-                exit_price, reason = (sl, "SL") if tf_cfg["sl_first_if_both_hit"] else (tp, "TP")
-            elif hit_sl:
-                exit_price, reason = sl, "SL"
-            elif hit_tp:
-                exit_price, reason = tp, "TP"
-            else:
-                continue
-
-            if not cfg.get("paper_mode"):
-                close_side = "sell" if side == "LONG" else "buy"
-                try:
-                    ex.create_order(symbol=symbol, type="market", side=close_side,
-                                     amount=t["contract_amount"],
-                                     params={"positionSide": side, "reduceOnly": True})
-                except Exception as e:
-                    state.add_log(f"⚠️ Auto-close order failed for ticket {t['id']} [{tf}]: {e}")
-            close_ticket_by_id(t["id"], exit_price, reason)
-
-    # 2) Look for a new entry on this timeframe — only ONCE per newly-closed candle on it
-    bar_ts = int(df["timestamp"].iloc[idx]) if idx >= 0 else None
-    is_new_bar = bar_ts is not None and bar_ts != state.last_signal_bar_ts.get(tf)
-
-    if (not state.bot_stopped and state.running and _is_trading_started(cfg)
-            and idx > 0 and is_new_bar):
-        long_condition, short_condition = compute_whale_signals(ind, idx, tf_cfg)
-        entry_price = float(df["close"].values[idx])  # this TF's own last closed price
-        if long_condition and can_open(tf, "LONG", tf_cfg):
-            open_ticket(symbol, tf, "LONG", entry_price, cfg, tf_cfg)
-        elif short_condition and can_open(tf, "SHORT", tf_cfg):
-            open_ticket(symbol, tf, "SHORT", entry_price, cfg, tf_cfg)
-        state.last_signal_bar_ts[tf] = bar_ts
+    if state.running and p["enabled"] and _is_trading_started(g):
+        bar_ts = int(ts_arr[idx])
+        last = ps.get("last_checked_ts")
+        if last is None:
+            with state.lock:
+                ps["last_checked_ts"] = bar_ts      # arm: only candles closing from now on can trigger
+        elif bar_ts > last:
+            with state.lock:
+                ps["last_checked_ts"] = bar_ts
+            if not ps["in_position"]:
+                buy, sell = bool(sig["buy"][idx]), bool(sig["sell"][idx])
+                if buy or sell:
+                    sig_side = "LONG" if buy else "SHORT"   # Pine: buy has priority
+                    side = sig_side
+                    if p["reverse"]:
+                        side = "SHORT" if sig_side == "LONG" else "LONG"
+                    state.add_log(f"[{pid}] {'BUY' if buy else 'SELL'} signal on closed candle "
+                                  f"{datetime.fromtimestamp(bar_ts / 1000).strftime('%H:%M')}"
+                                  f"{' -> REVERSE -> ' + side if p['reverse'] else ''}")
+                    fire_entry(pid, side, live_price, signal_side=sig_side, reversed_flag=bool(p["reverse"]))
 
 
 def _loop():
     print(f"[LOOP] PID={os.getpid()} - engine loop thread starting now", flush=True)
-    state.add_log("🟢 Engine started (1m + 3m + 5m Whale Hunter, independent strategies)")
+    state.add_log("🟢 Engine started (market data streaming for enabled slots)")
     while not _stop_flag.is_set():
-        cfg = state.snapshot()["config"]
+        cfg = state.get_config()
+        any_ok = False
         try:
-            symbol = cfg["symbol"]
             ex = get_exchange()
-
-            # one shared real-market price for balance/equity/manual-order/kill-switch,
-            # independent of any TF's candle close
+            ensure_markets(ex)
+            for pid in PAIR_IDS:
+                p = cfg["pairs"][pid]
+                ps = state.pair_state[pid]
+                if not p["enabled"] and not ps["in_position"]:
+                    continue    # disabled + flat -> nothing to do (open tickets are still managed)
+                try:
+                    process_pair(pid, cfg, ex)
+                    any_ok = True
+                except Exception as pe:
+                    msg = f"{type(pe).__name__}: {pe}"
+                    prev = (state.market.get(pid) or {}).get("error")
+                    state.set_market_error(pid, msg)
+                    if prev != msg:
+                        state.add_log(f"⚠️ [{pid}] {p['symbol']} error: {msg}")
             try:
-                ticker = ex.fetch_ticker(symbol)
-                live_price = float(ticker["last"])
+                bal = ex.fetch_balance()
+                state.balance = float(bal.get("USDT", {}).get("total", 0.0) or 0.0)
             except Exception:
-                live_price = state.live_price
-            if live_price:
-                state.live_price = live_price
-            state.connected = True
-
-            if cfg.get("paper_mode"):
-                state.balance = round(state.equity() + state.open_mark_value(), 4)
-            else:
-                try:
-                    bal = ex.fetch_balance()
-                    state.balance = float(bal.get("USDT", {}).get("total", 0.0))
-                except Exception:
-                    pass
-
-            # 1) Kill switch check FIRST (account-level) — realized equity <= 0 halts everything
-            if cfg["stop_when_blown"] and not state.bot_stopped and state.equity() <= 0:
-                state.bot_stopped = True
-                state.running = False
-                state.add_log("🛑 ACCOUNT BLOWN (equity <= 0) — closing all open tickets (all TF) + halting new entries")
-                close_all_tickets_kill_switch(symbol)
-
-            # 2) Run each enabled timeframe's fully independent cycle
-            for tf in TF_KEYS:
-                try:
-                    _process_timeframe(ex, symbol, tf, cfg)
-                except Exception as tf_err:
-                    state.add_log(f"⚠️ [{tf}] processing error [{type(tf_err).__name__}]: {tf_err}")
-
+                pass
         except Exception as ex_err:
-            state.connected = False
             state.add_log(f"⚠️ Loop error [{type(ex_err).__name__}]: {ex_err}")
-            print(f"[LOOP] PID={os.getpid()} - ERROR [{type(ex_err).__name__}]: {ex_err}", flush=True)
-
-        _stop_flag.wait(cfg.get("poll_seconds", 10))
+            print(f"[LOOP] ERROR [{type(ex_err).__name__}]: {ex_err}", flush=True)
+        state.connected = any_ok
+        _stop_flag.wait(max(3, int(cfg["global"].get("poll_seconds", 10))))
 
     state.connected = False
     state.add_log("🔴 Engine stopped")
@@ -712,12 +828,13 @@ def init_engine():
 
 
 def set_running(on: bool):
-    if on and state.bot_stopped:
-        state.add_log("⚠️ Cannot RUN — bot is stopped (equity <= 0). Reset via /api/reset-kill-switch first.")
-        return
     state.running = bool(on)
-    state.add_log("🟢 RUN enabled - all 3 TF strategies will open tickets on new signals" if on
-                  else "⏸ RUN disabled - market data keeps refreshing, no new tickets will open")
+    if on:
+        with state.lock:
+            for pid in PAIR_IDS:
+                state.pair_state[pid]["last_checked_ts"] = None   # re-arm on the current candle
+    state.add_log("🟢 RUN enabled - signals from newly closed candles will fire real orders" if on
+                  else "⏸ RUN disabled - market data keeps refreshing, no new orders will fire")
 
 
 # ============================================================================
@@ -734,7 +851,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Whale Hunter Bot — 1m + 3m + 5m Independent</title>
+<title>CCI Divergence · 5-Pair Engine</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -744,63 +861,64 @@ INDEX_HTML = r"""<!doctype html>
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:'Space Grotesk',sans-serif;-webkit-font-smoothing:antialiased;}
   .mono{font-family:'IBM Plex Mono',monospace;}
-  .app{display:grid;grid-template-columns:340px 1fr;grid-template-rows:64px 1fr;height:100vh;}
-  .brand{grid-column:1/2;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid var(--line);}
-  .brand .mark{width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,var(--gold),var(--gold-dim));display:flex;align-items:center;justify-content:center;font-weight:700;color:#0A0C12;font-size:12px;}
-  .brand h1{font-size:12.5px;letter-spacing:.03em;margin:0;font-weight:600;}
-  .brand .sub{color:var(--muted);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;}
+  .app{display:grid;grid-template-columns:350px 1fr;grid-template-rows:64px 1fr;height:100vh;}
+  .brand{grid-column:1;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);}
+  .brand .mark{width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,var(--gold),var(--gold-dim));display:flex;align-items:center;justify-content:center;font-weight:700;color:#0A0C12;font-size:13px;}
+  .brand h1{font-size:14px;letter-spacing:.04em;margin:0;font-weight:600;}
+  .brand .sub{color:var(--muted);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;}
   .topbar{grid-column:2;grid-row:1;display:flex;align-items:center;justify-content:space-between;padding:0 24px;border-bottom:1px solid var(--line);}
   .status-pill{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);}
   .dot.on{background:var(--long);box-shadow:0 0 8px var(--long);}
-  .dot.stopped{background:var(--short);box-shadow:0 0 8px var(--short);}
   .run-btn{background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:9px 18px;border-radius:8px;font-family:inherit;font-weight:600;font-size:12px;letter-spacing:.04em;cursor:pointer;}
   .run-btn.active{background:var(--long);color:#062018;border-color:var(--long);}
   .run-btn.stopped{background:var(--short);color:#2a0509;border-color:var(--short);}
   .manual-group{display:flex;gap:6px;align-items:center;}
-  select.tfsel{background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:7px 8px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;}
-  .manual-btn{border:1px solid var(--line);background:var(--panel-2);color:var(--text);padding:7px 12px;border-radius:6px;font-family:inherit;font-weight:600;font-size:11px;cursor:pointer;}
+  .manual-btn{border:1px solid var(--line);background:var(--panel-2);color:var(--text);padding:5px 9px;border-radius:6px;font-family:inherit;font-weight:600;font-size:10.5px;cursor:pointer;}
   .manual-btn.long{color:var(--long);border-color:var(--long);}
   .manual-btn.short{color:var(--short);border-color:var(--short);}
+  .manual-btn.reset{color:var(--muted);}
   .close-btn{background:transparent;border:1px solid var(--short);color:var(--short);padding:3px 9px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;cursor:pointer;}
-  .control{grid-column:1;grid-row:2;border-right:1px solid var(--line);overflow-y:auto;padding:20px;}
-  .control h2{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:22px 0 10px;}
+  .control{grid-column:1;grid-row:2;border-right:1px solid var(--line);overflow-y:auto;padding:18px;}
+  .control h2{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:20px 0 10px;}
   .control h2:first-child{margin-top:0;}
-  .control h3{font-size:12.5px;color:var(--gold);margin:16px 0 8px;padding-top:10px;border-top:1px dashed var(--line);}
-  .field{margin-bottom:10px;}
-  .field label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:5px;}
+  .tabs{display:flex;gap:6px;margin-bottom:14px;}
+  .tab{flex:1;background:var(--panel-2);border:1px solid var(--line);color:var(--muted);padding:8px 0;border-radius:8px;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:12px;cursor:pointer;border-bottom:3px solid var(--tc);}
+  .tab.active{color:var(--text);background:#1d2231;}
+  .pairform{display:none;} .pairform.active{display:block;}
+  .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .span2{grid-column:1/3;}
+  .field label{display:block;font-size:11px;color:var(--muted);margin-bottom:5px;line-height:1.3;}
   .field input, .field select{width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:7px;font-family:'IBM Plex Mono',monospace;font-size:12.5px;}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-  .save-btn{width:100%;margin-top:14px;background:var(--gold);color:#211a06;border:none;padding:11px;border-radius:8px;font-weight:700;font-size:12.5px;letter-spacing:.03em;cursor:pointer;font-family:inherit;}
-  .reset-btn{width:100%;margin-top:8px;background:transparent;border:1px solid var(--short);color:var(--short);padding:9px;border-radius:8px;font-weight:700;font-size:11.5px;cursor:pointer;font-family:inherit;}
+  .save-btn{width:100%;margin-top:16px;background:var(--gold);color:#211a06;border:none;padding:11px;border-radius:8px;font-weight:700;font-size:12.5px;letter-spacing:.03em;cursor:pointer;font-family:inherit;}
+  .warn{margin-top:16px;padding:10px 12px;background:#241412;border:1px solid #4a2620;border-radius:8px;font-size:11px;color:#f0a89c;line-height:1.5;}
   .main{grid-column:2;grid-row:2;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px;}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;}
-  .panel-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;}
-  .chart-toggle{display:flex;gap:4px;}
-  .chart-toggle button{background:var(--panel-2);border:1px solid var(--line);color:var(--muted);padding:4px 10px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;cursor:pointer;}
-  .chart-toggle button.active{color:var(--gold);border-color:var(--gold);}
+  .panel-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;}
+  .panel-title select{background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:4px 8px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;}
   .price{font-family:'IBM Plex Mono',monospace;color:var(--gold);}
-  #priceChart{height:280px;}
-  .tf-cci-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
-  .tf-block{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px;}
-  .tf-block .tfh{font-size:12px;font-weight:700;color:var(--gold);margin-bottom:10px;display:flex;justify-content:space-between;}
-  .cci-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
-  .cci-card{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:9px 10px;}
-  .cci-card .lbl{font-size:9.5px;color:var(--muted);text-transform:uppercase;}
-  .cci-card .val{font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;margin-top:3px;}
-  .tf-mini-stats{display:flex;flex-direction:column;gap:4px;margin-top:10px;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace;}
-  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+  #priceChart{height:300px;}
+  .pair-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;}
+  .pair-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:13px 14px;border-top:3px solid var(--c);}
+  .pair-card.off{opacity:.55;}
+  .pair-card .title{font-weight:700;font-size:12.5px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:6px;}
+  .pair-card .row{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);padding:2.5px 0;font-family:'IBM Plex Mono',monospace;}
+  .pair-card .row b{color:var(--text);}
+  .chk{display:flex;align-items:center;gap:7px;font-size:11.5px;padding:3px 0;cursor:pointer;}
+  .chk input{accent-color:var(--gold);width:15px;height:15px;}
+  .chk.rev{color:#f3c969;}
+  .st-err{font-size:10px;color:var(--short);margin-top:4px;word-break:break-word;font-family:'IBM Plex Mono',monospace;}
+  .metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;}
   .metric-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;}
   .metric-card .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
-  .metric-card .val{font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;margin-top:6px;}
+  .metric-card .val{font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;margin-top:6px;}
   .val.pos{color:var(--long);} .val.neg{color:var(--short);}
-  .split{display:grid;grid-template-columns:1.5fr 1fr;gap:16px;}
+  .split{display:grid;grid-template-columns:1.6fr 1fr;gap:16px;}
   table{width:100%;border-collapse:collapse;font-size:11.5px;}
   th{text-align:left;color:var(--muted);font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.05em;padding:6px 8px;border-bottom:1px solid var(--line);}
   td{padding:6px 8px;border-bottom:1px solid #191d29;font-family:'IBM Plex Mono',monospace;}
   .side-long{color:var(--long);} .side-short{color:var(--short);}
-  .tf-tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;background:var(--panel-2);border:1px solid var(--line);color:var(--gold);}
-  .logbox{max-height:230px;overflow-y:auto;font-family:'IBM Plex Mono',monospace;font-size:11.5px;}
+  .logbox{max-height:260px;overflow-y:auto;font-family:'IBM Plex Mono',monospace;font-size:11.5px;}
   .logline{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid #171a24;color:#B7C0D1;}
   .logline .t{color:var(--muted);}
   ::-webkit-scrollbar{width:8px;height:8px;} ::-webkit-scrollbar-thumb{background:#232838;border-radius:4px;}
@@ -808,7 +926,7 @@ INDEX_HTML = r"""<!doctype html>
   .badge-open{background:rgba(201,162,74,0.15);color:var(--gold);border:1px solid rgba(201,162,74,0.4);}
   .badge-win{background:rgba(62,216,160,0.15);color:var(--long);border:1px solid rgba(62,216,160,0.4);}
   .badge-loss{background:rgba(255,92,114,0.15);color:var(--short);border:1px solid rgba(255,92,114,0.4);}
-  .warn{margin-top:16px;padding:10px 12px;background:#241412;border:1px solid #4a2620;border-radius:8px;font-size:11px;color:#f0a89c;line-height:1.5;}
+  .tag{display:inline-block;padding:1px 6px;border-radius:5px;font-size:9.5px;font-weight:700;margin-right:4px;background:color-mix(in srgb,var(--tc) 20%,transparent);color:var(--tc);}
   #toastContainer{position:fixed;top:76px;right:20px;z-index:80;display:flex;flex-direction:column;gap:10px;}
   .toast{min-width:250px;max-width:320px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:12px 16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);animation:slideIn .25s ease-out, fadeOut .4s ease-in 5.6s forwards;}
   .toast.win{border-color:var(--long);} .toast.loss{border-color:var(--short);}
@@ -822,68 +940,52 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 <div id="toastContainer"></div>
 <div class="app">
-  <div class="brand"><div class="mark">WH</div><div><h1>WHALE HUNTER · 1m+3m+5m INDEPENDENT</h1><div class="sub" id="symbolLabel">LOADING…</div></div></div>
+  <div class="brand"><div class="mark">CCI</div><div><h1>CCI DIVERGENCE · 5 PAIRS</h1><div class="sub">BingX Futures</div></div></div>
   <div class="topbar">
-    <div class="status-pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span><span class="badge" id="modeBadge" style="margin-left:10px">--</span></div>
+    <div class="status-pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
     <div class="manual-group">
       <span class="status-pill">Balance <span class="mono price" id="balanceVal" style="margin-left:6px">--</span></span>
-      <select class="tfsel" id="manualTfSel"><option value="1m">TF 1m</option><option value="3m">TF 3m</option><option value="5m" selected>TF 5m</option></select>
-      <button class="manual-btn long" id="manualLongBtn">▲ LONG</button>
-      <button class="manual-btn short" id="manualShortBtn">▼ SHORT</button>
       <button class="run-btn stopped" id="runBtn">▶ RUN BOT</button>
     </div>
   </div>
 
   <div class="control">
-    <h2>โหมดการทำงาน / บัญชี</h2>
-    <div class="field"><label>โหมด</label>
-      <select id="cfg_paper_mode"><option value="true">📝 Paper (สมุดทด — ไม่ยิงออเดอร์จริง)</option><option value="false">🔴 Live (ยิงออเดอร์จริง)</option></select>
-    </div>
-    <div class="field"><label>Symbol</label><input id="cfg_symbol" type="text" /></div>
-    <div class="row2">
-      <div class="field"><label>ทุนเริ่มต้น (USD)</label><input id="cfg_initial_cap" type="number" step="0.01" /></div>
-      <div class="field"><label>Leverage (เท่า, ใช้ร่วมกันทั้ง 3 TF)</label><input id="cfg_leverage" type="number" step="1" /></div>
-    </div>
-    <div class="row2">
-      <div class="field"><label>ค่าธรรมเนียม (% ของมูลค่าสัญญาจริง)</label><input id="cfg_fee_pct" type="number" step="0.01" /></div>
-      <div class="field"><label>วันเริ่มเทรด</label><input id="cfg_bot_start_date" type="date" /></div>
-    </div>
-    <div class="field"><label>หยุดเปิดไม้ใหม่เมื่อพอร์ตติดลบ (Equity &lt;= 0)</label><select id="cfg_stop_when_blown"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
+    <h2>ตั้งค่ารายคู่เหรียญ</h2>
+    <div class="tabs" id="tabs"></div>
+    <div id="pairForms"></div>
 
-    <div id="tfPanels"></div>
+    <h2>Global</h2>
+    <div class="fgrid">
+      <div class="field"><label>Position Mode (บัญชี BingX)</label>
+        <select id="g_position_mode"><option value="hedge">Hedge (Long/Short แยก)</option><option value="oneway">One-way</option></select></div>
+      <div class="field"><label>Poll (วินาที)</label><input id="g_poll_seconds" type="number" step="1" /></div>
+      <div class="field span2"><label>วันเริ่มเทรด</label><input id="g_bot_start_date" type="date" /></div>
+    </div>
 
-    <button class="save-btn" id="saveCfgBtn">SAVE SETTINGS</button>
-    <button class="reset-btn" id="resetKillBtn">RESET KILL SWITCH</button>
-    <div class="warn">TF 1 นาที / 3 นาที / 5 นาที เป็นสามกลยุทธ์อิสระต่อกัน (สัญญาณ/TP/SL/จำนวนไม้ แยกกันคนละชุด) แต่เทรดสัญลักษณ์เดียวกันบนบัญชีเดียวกัน — ถ้าหลาย TF เปิดฝั่งเดียวกันพร้อมกันใน Live mode, BingX จะรวมเป็นโพซิชั่นจริงเดียว (มี TP/SL จริงต่อไม้ แต่สถิติรายไม้/รายTF อาจคลาดเคลื่อนเล็กน้อยที่ขอบเขต)</div>
+    <button class="save-btn" id="saveCfgBtn">SAVE SETTINGS (ทุกคู่เหรียญ)</button>
+    <div class="warn">ติ๊ก "เปิดใช้งาน" / "เทรดสวน" ได้ที่การ์ดของแต่ละคู่ด้านขวา (บันทึกทันที) — อย่าตั้ง 2 สล็อตที่เปิดใช้งานเป็นเหรียญเดียวกัน เพราะ BingX จะรวมเป็นโพซิชั่นเดียว</div>
   </div>
 
   <div class="main">
     <div class="panel">
-      <div class="panel-title"><span>Price Chart</span>
-        <div class="chart-toggle" id="chartToggle"><button data-tf="1m">1m</button><button data-tf="3m">3m</button><button data-tf="5m">5m</button></div>
-        <span class="price mono" id="livePrice">--</span>
-      </div>
+      <div class="panel-title"><span>Price Chart <select id="chartPairSel"></select></span><span class="price mono" id="livePrice">--</span></div>
       <div id="priceChart"></div>
     </div>
 
-    <div class="tf-cci-cols" id="tfCciCols"></div>
+    <div class="pair-grid" id="pairGrid"></div>
 
     <div class="metrics">
-      <div class="metric-card"><div class="lbl">สถานะบอท</div><div class="val" id="m_status">--</div></div>
-      <div class="metric-card"><div class="lbl">Equity / Mark-to-Market</div><div class="val" id="m_equity">--</div></div>
-      <div class="metric-card"><div class="lbl">กำไร/ขาดทุนสุทธิ (รวม)</div><div class="val" id="m_pnl">--</div></div>
-      <div class="metric-card"><div class="lbl">Winrate (รวม)</div><div class="val" id="m_winrate">--</div></div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-title"><span>ไม้ที่ถืออยู่ (Open Tickets — ทั้ง 3 TF)</span><span id="openCountLabel">--</span></div>
-      <table><thead><tr><th>TF</th><th>Side</th><th>Entry</th><th>TP</th><th>SL</th><th>Units</th><th>Notional</th><th>Unrealized</th><th>Action</th></tr></thead><tbody id="openTicketsBody"></tbody></table>
+      <div class="metric-card"><div class="lbl">Win Rate (รวม)</div><div class="val" id="m_winrate">--</div></div>
+      <div class="metric-card"><div class="lbl">Total Trades</div><div class="val" id="m_total">--</div></div>
+      <div class="metric-card"><div class="lbl">Net Profit (sim)</div><div class="val" id="m_pnl">--</div></div>
+      <div class="metric-card"><div class="lbl">Fees (sim)</div><div class="val" id="m_fees">--</div></div>
+      <div class="metric-card"><div class="lbl">Equity รวม (sim)</div><div class="val" id="m_equity">--</div></div>
     </div>
 
     <div class="split">
       <div class="panel">
         <div class="panel-title">List Order</div>
-        <table><thead><tr><th>TF</th><th>Time</th><th>Type</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead><tbody id="ordersBody"></tbody></table>
+        <table><thead><tr><th></th><th>Time</th><th>Type</th><th>Entry</th><th>TP</th><th>SL</th><th>PnL</th><th>Status</th><th>Action</th></tr></thead><tbody id="ordersBody"></tbody></table>
       </div>
       <div class="panel"><div class="panel-title">Bot Activity Log</div><div class="logbox" id="logBody"></div></div>
     </div>
@@ -891,17 +993,38 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 
 <script>
-const GLOBAL_KEYS = ["symbol","bot_start_date","initial_cap","leverage","fee_pct","stop_when_blown","paper_mode"];
-const TF_LIST = ["1m","3m","5m"];
-const TF_FIELD_KEYS = ["enabled","margin_usdt","allow_multi","max_trades_per_side","cci_len","ob_level","os_level",
-  "vol_ma_len","vol_mult","ema_len","tp_pct","sl_pct","allow_long","allow_short","sl_first_if_both_hit"];
-const TF_LABELS = {"1m":"TF 1 นาที","3m":"TF 3 นาที","5m":"TF 5 นาที"};
+const PAIRS = ['P1','P2','P3','P4','P5'];
+const COLORS = {P1:'#3ED8A0',P2:'#4CC9F0',P3:'#D65DB1',P4:'#C9A24A',P5:'#8E7CFF'};
+const TF_SEC = {'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,'4h':14400,'1d':86400};
 
-let chartTf = "5m";
-let cfgLoadedOnce = false;
-let lastSeenTradeId = null;
-let firstRender = true;
-let lastData = null;
+const PAIR_FIELDS = [
+  {sec:'Market', items:[
+    {k:'symbol', l:'Symbol (เช่น BEAT/USDT:USDT หรือพิมพ์ BEATUSDT)', t:'text', span:true},
+    {k:'timeframe', l:'Timeframe', t:'select', o:['1m','3m','5m','15m','30m','1h','2h','4h','1d']},
+    {k:'leverage', l:'Leverage (x)', t:'number', s:1}]},
+  {sec:'Trend Filter', items:[
+    {k:'use_ema', l:'กรองเทรนด์จาก EMA', t:'bool'},
+    {k:'ema_len', l:'EMA Length', t:'number', s:1}]},
+  {sec:'CCI Settings', items:[
+    {k:'cci_len', l:'CCI Length', t:'number', s:1},
+    {k:'use_ob_os', l:'เข้าเฉพาะโซน OB/OS', t:'bool'},
+    {k:'ob_level', l:'Overbought Level', t:'number', s:'any'},
+    {k:'os_level', l:'Oversold Level', t:'number', s:'any'}]},
+  {sec:'Divergence Settings', items:[
+    {k:'lbL', l:'Pivot Lookback Left', t:'number', s:1},
+    {k:'lbR', l:'Pivot Lookback Right', t:'number', s:1},
+    {k:'range_upper', l:'ระยะห่างสูงสุดระหว่าง Pivot (bars)', t:'number', s:1},
+    {k:'range_lower', l:'ระยะห่างต่ำสุดระหว่าง Pivot (bars)', t:'number', s:1}]},
+  {sec:'Risk Management', items:[
+    {k:'tp_pct', l:'Take Profit (% ราคา)', t:'number', s:'any'},
+    {k:'sl_pct', l:'Stop Loss (% ราคา)', t:'number', s:'any'},
+    {k:'fee_pct', l:'Fee % (Open+Close)', t:'number', s:'any'}]},
+  {sec:'Compound / Margin', items:[
+    {k:'initial_cap', l:'ทุนเริ่มต้นจำลอง (USD)', t:'number', s:'any'},
+    {k:'use_compound', l:'ทบทุนตามพอร์ตโต', t:'bool'},
+    {k:'compound_rate', l:'อัตราขนาดไม้ต่อวัน (% ของพอร์ต)', t:'number', s:'any'},
+    {k:'fixed_margin_usdt', l:'Margin คงที่ต่อไม้ (USDT, 0 = ใช้สูตรทบทุน)', t:'number', s:'any'}]},
+];
 
 const priceChart = LightweightCharts.createChart(document.getElementById('priceChart'), {
   layout:{background:{color:'transparent'}, textColor:'#7C879C', fontFamily:'IBM Plex Mono'},
@@ -909,235 +1032,272 @@ const priceChart = LightweightCharts.createChart(document.getElementById('priceC
   rightPriceScale:{borderColor:'#232838'}, timeScale:{borderColor:'#232838', timeVisible:true},
 });
 const candleSeries = priceChart.addCandlestickSeries({upColor:'#3ED8A0', downColor:'#FF5C72', borderVisible:false, wickUpColor:'#3ED8A0', wickDownColor:'#FF5C72'});
+const emaSeries = priceChart.addLineSeries({color:'#F5D90A', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
 
-function buildTfPanels(){
-  const wrap = document.getElementById('tfPanels');
-  wrap.innerHTML = TF_LIST.map(tf => `
-    <h3>${TF_LABELS[tf]}</h3>
-    <div class="field"><label>เปิดใช้งานกลยุทธ์นี้</label><select id="cfg_${tf}_enabled"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
-    <div class="row2">
-      <div class="field"><label>มูลค่ามาร์จิ้นต่อไม้ (USD)</label><input id="cfg_${tf}_margin_usdt" type="number" step="0.01" /></div>
-      <div class="field"><label>จำนวนไม้เปิดพร้อมกันสูงสุดต่อฝั่ง</label><input id="cfg_${tf}_max_trades_per_side" type="number" step="1" /></div>
-    </div>
-    <div class="field"><label>เปิดใช้งานการเปิดไม้ซ้อน</label><select id="cfg_${tf}_allow_multi"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
-    <div class="row2">
-      <div class="field"><label>CCI Length</label><input id="cfg_${tf}_cci_len" type="number" step="1" /></div>
-      <div class="field"><label>Overbought</label><input id="cfg_${tf}_ob_level" type="number" step="1" /></div>
-    </div>
-    <div class="row2">
-      <div class="field"><label>Oversold</label><input id="cfg_${tf}_os_level" type="number" step="1" /></div>
-      <div class="field"><label>EMA Length</label><input id="cfg_${tf}_ema_len" type="number" step="1" /></div>
-    </div>
-    <div class="row2">
-      <div class="field"><label>Volume MA Length</label><input id="cfg_${tf}_vol_ma_len" type="number" step="1" /></div>
-      <div class="field"><label>Volume Multiplier (x)</label><input id="cfg_${tf}_vol_mult" type="number" step="0.1" /></div>
-    </div>
-    <div class="row2">
-      <div class="field"><label>Take Profit (%)</label><input id="cfg_${tf}_tp_pct" type="number" step="0.1" /></div>
-      <div class="field"><label>Stop Loss (%)</label><input id="cfg_${tf}_sl_pct" type="number" step="0.1" /></div>
-    </div>
-    <div class="row2">
-      <div class="field"><label>อนุญาตเปิด Long</label><select id="cfg_${tf}_allow_long"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
-      <div class="field"><label>อนุญาตเปิด Short</label><select id="cfg_${tf}_allow_short"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
-    </div>
-    <div class="field"><label>ถ้า TP/SL แตะพร้อมกัน นับ SL ก่อน</label><select id="cfg_${tf}_sl_first_if_both_hit"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>
-  `).join('');
+let chartPair = 'P1', lastChartPair = null, activeTab = 'P1';
+let cfgLoadedOnce = false, lastSeenTradeId = null, firstRender = true;
+const $ = id => document.getElementById(id);
+const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function fieldHTML(pid, f){
+  const id = `cfg_${pid}_${f.k}`;
+  const span = f.span ? ' span2' : '';
+  if(f.t==='bool') return `<div class="field${span}"><label>${f.l}</label><select id="${id}"><option value="true">เปิด</option><option value="false">ปิด</option></select></div>`;
+  if(f.t==='select') return `<div class="field${span}"><label>${f.l}</label><select id="${id}">${f.o.map(o=>`<option value="${o}">${o}</option>`).join('')}</select></div>`;
+  return `<div class="field${span}"><label>${f.l}</label><input id="${id}" type="${f.t==='text'?'text':'number'}" step="${f.s||'any'}" /></div>`;
 }
-buildTfPanels();
+
+function buildForms(){
+  $('tabs').innerHTML = PAIRS.map(pid=>`<button class="tab${pid===activeTab?' active':''}" data-p="${pid}" style="--tc:${COLORS[pid]}">${pid}</button>`).join('');
+  $('pairForms').innerHTML = PAIRS.map(pid=>`
+    <div class="pairform${pid===activeTab?' active':''}" id="form_${pid}">
+      ${PAIR_FIELDS.map(sec=>`<h2>${sec.sec}</h2><div class="fgrid">${sec.items.map(f=>fieldHTML(pid,f)).join('')}</div>`).join('')}
+    </div>`).join('');
+  document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click', ()=>{
+    activeTab = b.dataset.p;
+    document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active', x.dataset.p===activeTab));
+    PAIRS.forEach(pid=>$('form_'+pid).classList.toggle('active', pid===activeTab));
+  }));
+}
+
+function buildCards(){
+  $('pairGrid').innerHTML = PAIRS.map(pid=>`
+    <div class="pair-card off" id="card_${pid}" style="--c:${COLORS[pid]}">
+      <div class="title"><span>${pid} · <span id="sym_${pid}">--</span></span><span id="pos_${pid}">--</span></div>
+      <label class="chk"><input type="checkbox" id="en_${pid}"> เปิดใช้งานคู่นี้</label>
+      <label class="chk rev"><input type="checkbox" id="rv_${pid}"> เทรดสวน (Buy→Sell / Sell→Buy)</label>
+      <div class="row"><span>ราคา</span><b id="px_${pid}">--</b></div>
+      <div class="row"><span>CCI</span><b id="cci_${pid}">--</b></div>
+      <div class="row"><span>ออเดอร์</span><b id="tot_${pid}">--</b></div>
+      <div class="row"><span>ชนะ/แพ้</span><b id="wl_${pid}">--</b></div>
+      <div class="row"><span>Equity</span><b id="eq_${pid}">--</b></div>
+      <div class="row"><span>กำไรสุทธิ</span><b id="net_${pid}">--</b></div>
+      <div class="st-err" id="err_${pid}"></div>
+      <div class="manual-group" style="margin-top:8px;flex-wrap:wrap">
+        <button class="manual-btn long" data-p="${pid}" data-side="LONG">▲ LONG</button>
+        <button class="manual-btn short" data-p="${pid}" data-side="SHORT">▼ SHORT</button>
+        <button class="manual-btn reset" data-reset="${pid}" title="รีเซ็ตสถิติคู่นี้">↺ สถิติ</button>
+      </div>
+    </div>`).join('');
+  PAIRS.forEach(pid=>{
+    $('en_'+pid).addEventListener('change', e=>postConfig({pairs:{[pid]:{enabled:e.target.checked}}}));
+    $('rv_'+pid).addEventListener('change', e=>postConfig({pairs:{[pid]:{reverse:e.target.checked}}}));
+  });
+  document.querySelectorAll('.manual-btn[data-side]').forEach(btn=>btn.addEventListener('click', async ()=>{
+    const pid=btn.dataset.p, side=btn.dataset.side;
+    if(!confirm(`เปิดออเดอร์ ${side} ด้วยมือ (${pid}) ยิงจริงทันที แน่ใจไหม?`)) return;
+    const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pair:pid, side})});
+    const j = await res.json();
+    if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: '+(j.message||j.error||'unknown error'));
+  }));
+  document.querySelectorAll('.manual-btn[data-reset]').forEach(btn=>btn.addEventListener('click', async ()=>{
+    const pid=btn.dataset.reset;
+    if(!confirm(`รีเซ็ตสถิติ/Equity ของ ${pid} ?`)) return;
+    const res = await fetch('/api/reset-pair', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pair:pid})});
+    const j = await res.json();
+    if(!j.ok) alert(j.message||'reset failed');
+  }));
+}
+
+function buildChartSelect(){
+  $('chartPairSel').innerHTML = PAIRS.map(pid=>`<option value="${pid}">${pid}</option>`).join('');
+  $('chartPairSel').addEventListener('change', e=>{ chartPair = e.target.value; poll(true); });
+}
+
+async function postConfig(patch){
+  try{
+    const res = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch)});
+    const j = await res.json();
+    if(j.warnings && j.warnings.length) alert(j.warnings.join('\n\n'));
+    return j;
+  }catch(e){ alert('Save failed: '+e); }
+}
+
+function populateForm(cfg){
+  PAIRS.forEach(pid=>{
+    const pc = cfg.pairs[pid];
+    PAIR_FIELDS.forEach(sec=>sec.items.forEach(f=>{
+      const el = $(`cfg_${pid}_${f.k}`); if(el && pc[f.k]!==undefined) el.value = String(pc[f.k]);
+    }));
+  });
+  $('g_position_mode').value = cfg.global.position_mode;
+  $('g_poll_seconds').value = cfg.global.poll_seconds;
+  $('g_bot_start_date').value = cfg.global.bot_start_date;
+}
+
+function collectPatch(){
+  const pairs = {};
+  PAIRS.forEach(pid=>{
+    pairs[pid] = {};
+    PAIR_FIELDS.forEach(sec=>sec.items.forEach(f=>{ const el=$(`cfg_${pid}_${f.k}`); if(el) pairs[pid][f.k]=el.value; }));
+  });
+  return {global:{position_mode:$('g_position_mode').value, poll_seconds:$('g_poll_seconds').value, bot_start_date:$('g_bot_start_date').value}, pairs};
+}
 
 function statusBadge(t){
   if(t.status==='OPEN') return `<span class="badge badge-open">🔵 OPEN</span>`;
-  if(t.status==='WIN')  return `<span class="badge badge-win">✅ TP/WIN</span>`;
-  if(t.status==='LOSS') return `<span class="badge badge-loss">❌ SL/LOSS</span>`;
-  return t.status||'';
+  if(t.status==='WIN')  return `<span class="badge badge-win">✅ WIN</span>`;
+  if(t.status==='LOSS') return `<span class="badge badge-loss">❌ LOSS</span>`;
+  return esc(t.status);
 }
+function pairTag(pid){ return pid ? `<span class="tag" style="--tc:${COLORS[pid]||'#999'}">${esc(pid)}</span>` : ''; }
+
 function showToast(t){
   const isWin = t.status==='WIN';
   const el = document.createElement('div');
   el.className = 'toast ' + (isWin?'win':'loss');
-  el.innerHTML = `<div class="ttitle">${isWin?'🎯 TP HIT':'🛑 SL HIT'} · <span class="tf-tag">${t.tf||''}</span></div><div class="tbody">${t.side} @ ${t.exit??''} · PnL ${(t.pnl>=0?'+':'')+t.pnl} USDT</div>`;
-  document.getElementById('toastContainer').appendChild(el);
+  el.innerHTML = `<div class="ttitle">${pairTag(t.pair)} ${isWin?'🎯 TP HIT':'🛑 SL / LOSS'}</div><div class="tbody">${esc(t.side)} @ ${esc(t.exit)} · PnL ${(t.pnl>=0?'+':'')+esc(t.pnl)} USDT</div>`;
+  $('toastContainer').appendChild(el);
   setTimeout(()=>el.remove(), 6200);
 }
 function maybeShowToast(trades){
   if(!trades || !trades.length) return;
-  const newest = trades[0];
-  if(newest.status!=='WIN' && newest.status!=='LOSS') return;
+  const newest = trades.find(t=>t.status==='WIN'||t.status==='LOSS');
+  if(!newest) return;
   if(firstRender){ lastSeenTradeId = newest.id; firstRender = false; return; }
   if(newest.id === lastSeenTradeId) return;
   lastSeenTradeId = newest.id;
   showToast(newest);
 }
 
-async function poll(){
-  try{ const res = await fetch('/api/status'); lastData = await res.json(); render(lastData); }catch(e){ console.error(e); }
-  setTimeout(poll, 4000);
+let polling = false;
+async function poll(once){
+  if(polling && !once) return;
+  try{ const res = await fetch('/api/status?pair='+chartPair); render(await res.json()); }catch(e){ console.error(e); }
+  if(!once) setTimeout(poll, 4000);
 }
 
-function isPaper(){ return document.getElementById('cfg_paper_mode').value === 'true'; }
+function updateCard(pid, pc, ps){
+  $('sym_'+pid).textContent = (pc.symbol||'').replace(':USDT','');
+  $('en_'+pid).checked = !!pc.enabled;
+  $('rv_'+pid).checked = !!pc.reverse;
+  $('card_'+pid).classList.toggle('off', !pc.enabled && !ps.in_position);
+  $('pos_'+pid).textContent = ps.in_position ? ('🟢 '+ps.pos_side+(ps.reversed?' ↺':'')) : (pc.enabled ? '⚪ ว่าง' : '⏸ ปิด');
+  $('px_'+pid).textContent = ps.live_price ?? '--';
+  $('cci_'+pid).textContent = ps.osc ?? '--';
+  $('tot_'+pid).textContent = ps.total_trades;
+  $('wl_'+pid).textContent = `${ps.wins} / ${ps.losses} (${ps.win_rate}%)`;
+  $('eq_'+pid).textContent = ps.equity.toFixed(2);
+  const net = $('net_'+pid);
+  net.textContent = (ps.net_profit>=0?'+':'') + ps.net_profit.toFixed(2);
+  net.style.color = ps.net_profit>=0 ? 'var(--long)' : 'var(--short)';
+  $('err_'+pid).textContent = ps.status==='error' ? ('⚠ '+(ps.error||'error')) : '';
+}
 
 function renderChart(data){
-  const mkt = data.market[chartTf];
-  if(mkt && mkt.ohlcv && mkt.ohlcv.length){
-    candleSeries.setData(mkt.ohlcv.map(r=>({time:Math.floor(r[0]/1000), open:r[1], high:r[2], low:r[3], close:r[4]})));
-    const markers = [];
-    data.trades.filter(t=>t.tf===chartTf).forEach(t=>{
-      markers.push({time: Math.floor(t.entry_ms/1000), position: t.side==='LONG'?'belowBar':'aboveBar', color: t.side==='LONG'?'#3ED8A0':'#FF5C72', shape: t.side==='LONG'?'arrowUp':'arrowDown', text: t.side});
-      if((t.status==='WIN'||t.status==='LOSS') && t.exit_ms){
-        markers.push({time: Math.floor(t.exit_ms/1000), position: t.status==='WIN'?'aboveBar':'belowBar', color: t.status==='WIN'?'#3ED8A0':'#FF5C72', shape: t.status==='WIN'?'circle':'square', text: t.status==='WIN'?'TP':'SL'});
-      }
-    });
-    markers.sort((a,b)=>a.time-b.time);
-    candleSeries.setMarkers(markers);
-  }
-  document.querySelectorAll('#chartToggle button').forEach(b=>b.classList.toggle('active', b.dataset.tf===chartTf));
+  const cfg = data.config.pairs[data.chart_pair];
+  const tf = TF_SEC[cfg.timeframe] || 300;
+  const snap = ms => Math.floor(ms/1000/tf)*tf;
+  const ch = data.chart;
+  if(!ch.ohlcv.length){ candleSeries.setData([]); emaSeries.setData([]); candleSeries.setMarkers([]); return; }
+  const bars = ch.ohlcv.map(r=>({time:Math.floor(r[0]/1000), open:r[1], high:r[2], low:r[3], close:r[4]}));
+  candleSeries.setData(bars);
+  emaSeries.setData(ch.ema.length ? ch.ema.map((v,i)=>({time:bars[i].time, value:v})) : []);
+  const first = bars[0].time;
+  const markers = [];
+  ch.buy_ts.forEach(ts=>markers.push({time:snap(ts), position:'belowBar', color:'#3ED8A0', shape:'circle', text:'Bull'}));
+  ch.sell_ts.forEach(ts=>markers.push({time:snap(ts), position:'aboveBar', color:'#FF5C72', shape:'circle', text:'Bear'}));
+  data.trades.filter(t=>t.pair===data.chart_pair).forEach(t=>{
+    markers.push({time:snap(t.entry_ms), position:t.side==='LONG'?'belowBar':'aboveBar', color:'#F5D90A', shape:t.side==='LONG'?'arrowUp':'arrowDown', text:(t.reversed?'↺ ':'')+t.side});
+    if((t.status==='WIN'||t.status==='LOSS') && t.exit_ms)
+      markers.push({time:snap(t.exit_ms), position:t.status==='WIN'?'aboveBar':'belowBar', color:t.status==='WIN'?'#3ED8A0':'#FF5C72', shape:t.status==='WIN'?'circle':'square', text:t.status==='WIN'?'TP':'SL'});
+  });
+  candleSeries.setMarkers(markers.filter(m=>m.time>=first).sort((a,b)=>a.time-b.time));
+  if(lastChartPair!==data.chart_pair){ priceChart.timeScale().fitContent(); lastChartPair = data.chart_pair; }
 }
 
 function render(data){
-  document.getElementById('connDot').className = 'dot ' + (data.bot_stopped?'stopped':(data.connected?'on':''));
-  document.getElementById('connText').textContent = data.bot_stopped ? 'STOPPED (พอร์ตแตก)' : (data.connected ? 'CONNECTED · BingX' : 'CONNECTING…');
-  const modeBadge = document.getElementById('modeBadge');
-  modeBadge.textContent = data.config.paper_mode ? '📝 PAPER MODE' : '🔴 LIVE';
-  modeBadge.className = 'badge ' + (data.config.paper_mode ? 'badge-open' : 'badge-loss');
-  document.getElementById('symbolLabel').textContent = (data.config.symbol||'') + ' · 1m+3m+5m';
-  document.getElementById('livePrice').textContent = data.live_price ? ('$'+data.live_price) : '--';
-  document.getElementById('balanceVal').textContent = '$' + (data.balance||0).toFixed(2);
-
-  const runBtn = document.getElementById('runBtn');
+  $('connDot').className = 'dot ' + (data.connected?'on':'');
+  $('connText').textContent = data.connected ? 'CONNECTED · BingX' : 'CONNECTING…';
+  $('balanceVal').textContent = '$' + (data.balance||0).toFixed(2);
+  const runBtn = $('runBtn');
   runBtn.textContent = data.running ? '■ STOP BOT' : '▶ RUN BOT';
   runBtn.className = 'run-btn ' + (data.running?'active':'stopped');
-  runBtn.disabled = data.bot_stopped;
 
-  const cciWrap = document.getElementById('tfCciCols');
-  cciWrap.innerHTML = TF_LIST.map(tf=>{
-    const m = data.market[tf] || {};
-    const ts = data.tf_stats[tf] || {};
-    const tfc = data.config.tf_settings[tf] || {};
-    return `<div class="tf-block">
-      <div class="tfh"><span>${TF_LABELS[tf]}</span><span>${tfc.enabled ? '🟢 เปิด' : '⚪ ปิด'}</span></div>
-      <div class="cci-row">
-        <div class="cci-card"><div class="lbl">CCI</div><div class="val">${m.cci ?? '--'}</div></div>
-        <div class="cci-card"><div class="lbl">EMA${tfc.ema_len||''}</div><div class="val">${m.ema ?? '--'}</div></div>
-        <div class="cci-card"><div class="lbl">Vol/MA</div><div class="val">${m.vol_ratio!=null ? m.vol_ratio+'x' : '--'}</div></div>
-      </div>
-      <div class="tf-mini-stats">
-        <span>เปิดอยู่: <span class="side-long">${ts.open_long||0}L</span> / <span class="side-short">${ts.open_short||0}S</span> (max ${tfc.max_trades_per_side})</span>
-        <span>Winrate: ${ts.winrate||0}% (${ts.wins||0}W/${ts.losses||0}L)</span>
-        <span class="${(ts.net_profit||0)>=0?'side-long':'side-short'}">Net: ${(ts.net_profit||0)>=0?'+':''}${(ts.net_profit||0).toFixed(4)}</span>
-      </div>
-    </div>`;
-  }).join('');
+  PAIRS.forEach(pid=>updateCard(pid, data.config.pairs[pid], data.pairs[pid]));
+  const sel = $('chartPairSel');
+  PAIRS.forEach((pid,i)=>{ sel.options[i].text = pid+' · '+(data.config.pairs[pid].symbol||'').replace(':USDT',''); });
+  sel.value = chartPair;
+  const lp = data.pairs[chartPair].live_price;
+  $('livePrice').textContent = lp ? ('$'+lp) : '--';
 
-  const statusEl = document.getElementById('m_status');
-  const openCount = data.tickets.length;
-  statusEl.textContent = data.bot_stopped ? 'STOPPED' : (openCount>0 ? `RUNNING (ถืออยู่ ${openCount} ไม้)` : (data.running ? 'RUNNING (รอสัญญาณ)' : 'IDLE'));
-  statusEl.className = 'val ' + (data.bot_stopped ? 'neg' : (data.running ? 'pos' : ''));
-
-  document.getElementById('m_equity').textContent = data.equity + ' / ' + data.unrealized_equity + ' USDT';
-  const pnlEl = document.getElementById('m_pnl');
-  pnlEl.textContent = (data.stats.net_profit>=0?'+':'') + data.stats.net_profit.toFixed(4) + ' USDT (' + (data.net_pct>=0?'+':'') + data.net_pct + '%)';
-  pnlEl.className = 'val ' + (data.stats.net_profit>=0?'pos':'neg');
-  document.getElementById('m_winrate').textContent = data.winrate + '% (' + data.stats.wins + 'W / ' + data.stats.losses + 'L)';
-
-  document.getElementById('openCountLabel').textContent = TF_LIST.map(tf=>{
-    const ts = data.tf_stats[tf]||{};
-    return `${tf}: ${ts.open_long||0}L/${ts.open_short||0}S`;
-  }).join(' · ');
-  const px = data.live_price;
-  const openBody = document.getElementById('openTicketsBody');
-  openBody.innerHTML = data.tickets.map(t=>{
-    const unreal = px ? (t.side==='LONG' ? (px-t.entry_price)*t.contract_amount : (t.entry_price-px)*t.contract_amount) : 0;
-    return `<tr>
-      <td><span class="tf-tag">${t.tf}</span></td>
-      <td class="${t.side==='LONG'?'side-long':'side-short'}">${t.side}</td>
-      <td>${t.entry_price}</td><td>${t.tp}</td><td>${t.sl}</td>
-      <td>${t.contract_amount}</td><td>$${t.notional.toFixed(2)}</td>
-      <td class="${unreal>=0?'side-long':'side-short'}">${unreal>=0?'+':''}${unreal.toFixed(4)}</td>
-      <td><button class="close-btn" data-id="${t.id}">CLOSE</button></td>
-    </tr>`;
-  }).join('') || `<tr><td colspan="9" style="color:var(--muted)">ไม่มีไม้ที่เปิดอยู่</td></tr>`;
-  openBody.querySelectorAll('.close-btn').forEach(btn=>{
-    btn.addEventListener('click', async ()=>{
-      btn.disabled=true; btn.textContent='...';
-      const res = await fetch('/api/close-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ticket_id: btn.dataset.id})});
-      const j = await res.json();
-      if(!j.ok) alert('Close failed: '+(j.message||j.error||'unknown error'));
-    });
-  });
+  const cb = data.combined;
+  $('m_winrate').textContent = cb.win_rate + '%';
+  $('m_total').textContent = cb.total_trades;
+  const pnlEl = $('m_pnl');
+  pnlEl.textContent = (cb.net_profit>=0?'+':'') + cb.net_profit + ' USDT';
+  pnlEl.className = 'val ' + (cb.net_profit>=0?'pos':'neg');
+  $('m_fees').textContent = cb.fees + ' USDT';
+  $('m_equity').textContent = cb.equity + ' USDT';
 
   renderChart(data);
 
-  const ordersBody = document.getElementById('ordersBody');
-  ordersBody.innerHTML = data.trades.map(t=>`
+  const ob = $('ordersBody');
+  ob.innerHTML = data.trades.map(t=>`
     <tr>
-      <td><span class="tf-tag">${t.tf||''}</span></td>
-      <td>${t.time||''}</td>
-      <td class="${t.side==='LONG'?'side-long':'side-short'}">${t.type||''}</td>
-      <td>${t.entry??''}</td><td>${t.tp??''}</td><td>${t.sl??''}</td>
+      <td>${pairTag(t.pair)}</td>
+      <td>${esc(t.time)}</td>
+      <td class="${t.side==='LONG'?'side-long':'side-short'}">${esc(t.type)}</td>
+      <td>${esc(t.entry)}</td><td>${esc(t.tp)}</td><td>${esc(t.sl)}</td>
+      <td>${t.pnl==null?'':esc(t.pnl)}</td>
       <td>${statusBadge(t)}</td>
+      <td>${t.status==='OPEN' ? `<button class="close-btn" data-p="${esc(t.pair)}">CLOSE</button>` : ''}</td>
     </tr>`).join('');
+  ob.querySelectorAll('.close-btn').forEach(btn=>btn.addEventListener('click', async ()=>{
+    btn.disabled=true; btn.textContent='...';
+    const res = await fetch('/api/close-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pair: btn.dataset.p})});
+    const j = await res.json();
+    if(!j.ok) alert('Close failed: '+(j.message||j.error||'unknown error'));
+  }));
 
   maybeShowToast(data.trades);
-  document.getElementById('logBody').innerHTML = data.logs.slice().reverse().map(l=>`<div class="logline"><span class="t">${l.time}</span><span>${l.text}</span></div>`).join('');
+  $('logBody').innerHTML = data.logs.slice().reverse().map(l=>`<div class="logline"><span class="t">${esc(l.time)}</span><span>${esc(l.text)}</span></div>`).join('');
 
-  if(!cfgLoadedOnce){
-    GLOBAL_KEYS.forEach(k=>{ const el = document.getElementById('cfg_'+k); if(el && data.config[k]!==undefined) el.value = data.config[k]; });
-    TF_LIST.forEach(tf=>{
-      const tfc = data.config.tf_settings[tf] || {};
-      TF_FIELD_KEYS.forEach(k=>{ const el = document.getElementById(`cfg_${tf}_${k}`); if(el && tfc[k]!==undefined) el.value = tfc[k]; });
-    });
-    chartTf = data.config.chart_tf || "5m";
-    cfgLoadedOnce = true;
-  }
+  if(!cfgLoadedOnce){ populateForm(data.config); cfgLoadedOnce = true; }
 }
 
-document.getElementById('chartToggle').addEventListener('click', (e)=>{
-  const btn = e.target.closest('button'); if(!btn) return;
-  chartTf = btn.dataset.tf;
-  if(lastData) renderChart(lastData);
-});
-
-document.getElementById('manualLongBtn').addEventListener('click', async ()=>{
-  const tf = document.getElementById('manualTfSel').value;
-  const msg = isPaper() ? `บันทึกออเดอร์ LONG จำลอง (Paper) บน TF ${tf} ตอนนี้เลยไหม?` : `เปิดออเดอร์ LONG ด้วยมือบน TF ${tf} ยิงจริงทันที แน่ใจไหม?`;
-  if(!confirm(msg)) return;
-  const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({side:'LONG', tf})});
-  const j = await res.json();
-  if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: '+(j.message||j.error||'unknown error'));
-});
-document.getElementById('manualShortBtn').addEventListener('click', async ()=>{
-  const tf = document.getElementById('manualTfSel').value;
-  const msg = isPaper() ? `บันทึกออเดอร์ SHORT จำลอง (Paper) บน TF ${tf} ตอนนี้เลยไหม?` : `เปิดออเดอร์ SHORT ด้วยมือบน TF ${tf} ยิงจริงทันที แน่ใจไหม?`;
-  if(!confirm(msg)) return;
-  const res = await fetch('/api/manual-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({side:'SHORT', tf})});
-  const j = await res.json();
-  if(!j.ok) alert('เปิดออเดอร์ไม่สำเร็จ: '+(j.message||j.error||'unknown error'));
-});
-document.getElementById('runBtn').addEventListener('click', async ()=>{
-  const willRun = document.getElementById('runBtn').textContent.includes('RUN');
+$('runBtn').addEventListener('click', async ()=>{
+  const willRun = $('runBtn').textContent.includes('RUN');
   await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({running: willRun})});
 });
-document.getElementById('resetKillBtn').addEventListener('click', async ()=>{
-  if(!confirm('รีเซ็ต Kill Switch? บอทจะสามารถ RUN ได้อีกครั้ง')) return;
-  await fetch('/api/reset-kill-switch', {method:'POST'});
-});
-document.getElementById('saveCfgBtn').addEventListener('click', async ()=>{
-  const patchGlobal = {};
-  GLOBAL_KEYS.forEach(k=>{ const el = document.getElementById('cfg_'+k); if(el) patchGlobal[k]=el.value; });
-  patchGlobal['chart_tf'] = chartTf;
-  const patchTf = {};
-  TF_LIST.forEach(tf=>{
-    patchTf[tf] = {};
-    TF_FIELD_KEYS.forEach(k=>{ const el = document.getElementById(`cfg_${tf}_${k}`); if(el) patchTf[tf][k]=el.value; });
-  });
-  await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({global: patchGlobal, tf: patchTf})});
+
+$('saveCfgBtn').addEventListener('click', async ()=>{
+  const j = await postConfig(collectPatch());
+  if(j && j.ok){ cfgLoadedOnce = false; }   // reload the form with the values the server actually accepted
 });
 
+buildForms(); buildCards(); buildChartSelect();
 poll();
 </script>
 </body>
 </html>
 """
+
+
+def clean_values(raw: dict, schema: dict) -> dict:
+    out = {}
+    for k, v in raw.items():
+        t = schema.get(k)
+        if t is None:
+            continue
+        try:
+            if t == "int":
+                f = float(v)
+                if not math.isfinite(f):
+                    continue
+                out[k] = int(f)
+            elif t == "float":
+                f = float(v)
+                if not math.isfinite(f):
+                    continue
+                out[k] = f
+            elif t == "bool":
+                out[k] = v if isinstance(v, bool) else str(v).strip().lower() in ("true", "1", "yes", "on")
+            else:
+                out[k] = str(v).strip()
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 @app.route("/")
@@ -1147,96 +1307,141 @@ def index():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "connected": state.connected, "running": state.running, "bot_stopped": state.bot_stopped})
+    return jsonify({"status": "ok", "connected": state.connected, "running": state.running})
 
 
 @app.route("/api/status")
 def api_status():
-    return jsonify(state.snapshot())
+    pair = request.args.get("pair", "P1")
+    if pair not in PAIR_IDS:
+        pair = "P1"
+    return jsonify(state.snapshot(pair))
 
 
 @app.route("/api/config", methods=["POST"])
 def api_config():
-    payload = request.get_json(force=True) or {}
-    patch_global_raw = payload.get("global", {})
-    patch_tf_raw = payload.get("tf", {})
+    body = request.get_json(force=True) or {}
+    warnings = []
+    cur = state.get_config()
 
-    numeric_global = {"leverage", "initial_cap", "fee_pct"}
-    bool_global = {"stop_when_blown", "paper_mode"}
-    string_global = {"symbol", "bot_start_date", "chart_tf"}
+    g_clean = clean_values(body.get("global") or {}, GLOBAL_SCHEMA)
+    if "position_mode" in g_clean and g_clean["position_mode"] not in ("hedge", "oneway"):
+        del g_clean["position_mode"]
+    if "poll_seconds" in g_clean:
+        g_clean["poll_seconds"] = max(3, g_clean["poll_seconds"])
+    if "bot_start_date" in g_clean:
+        try:
+            datetime.strptime(g_clean["bot_start_date"], "%Y-%m-%d")
+        except ValueError:
+            del g_clean["bot_start_date"]
 
-    numeric_tf = {"margin_usdt", "max_trades_per_side", "cci_len", "ob_level", "os_level",
-                  "vol_ma_len", "vol_mult", "ema_len", "tp_pct", "sl_pct"}
-    bool_tf = {"enabled", "allow_multi", "allow_long", "allow_short", "sl_first_if_both_hit"}
-
-    clean_global = {}
-    for k, v in patch_global_raw.items():
-        if k in numeric_global:
-            try:
-                clean_global[k] = float(v) if "." in str(v) else int(v)
-            except (TypeError, ValueError):
-                continue
-        elif k in bool_global:
-            clean_global[k] = str(v).strip().lower() == "true"
-        elif k in string_global:
-            clean_global[k] = str(v)
-
-    clean_tf = {}
-    for tf, sub in patch_tf_raw.items():
-        if tf not in TF_KEYS:
+    pair_clean = {}
+    for pid, raw in (body.get("pairs") or {}).items():
+        if pid not in PAIR_IDS or not isinstance(raw, dict):
             continue
-        clean_sub = {}
-        for k, v in (sub or {}).items():
-            if k in numeric_tf:
-                try:
-                    clean_sub[k] = float(v) if "." in str(v) else int(v)
-                except (TypeError, ValueError):
-                    continue
-            elif k in bool_tf:
-                clean_sub[k] = str(v).strip().lower() == "true"
-        clean_tf[tf] = clean_sub
+        c = clean_values(raw, PAIR_SCHEMA)
+        ps = state.pair_state[pid]
 
-    state.update_config(clean_global, clean_tf)
-    state.add_log(f"Config updated: global={clean_global} tf={clean_tf}")
-    return jsonify(state.snapshot()["config"])
+        if "symbol" in c:
+            new_sym = normalize_symbol(c["symbol"])
+            if new_sym == cur["pairs"][pid]["symbol"]:
+                c["symbol"] = new_sym
+            elif ps["in_position"]:
+                warnings.append(f"[{pid}] Symbol not changed: close the open ticket first.")
+                del c["symbol"]
+            else:
+                ok, msg = verify_symbol(new_sym)
+                if ok is False:
+                    warnings.append(f"[{pid}] {msg}")
+                    del c["symbol"]
+                else:
+                    c["symbol"] = new_sym
+                    if ok is None:
+                        warnings.append(f"[{pid}] {msg}")
+        if "timeframe" in c and c["timeframe"] not in TIMEFRAMES:
+            del c["timeframe"]
+        for k, mn in PAIR_MIN.items():
+            if k in c:
+                c[k] = max(c[k], mn)
+        for k, mx in PAIR_MAX.items():
+            if k in c:
+                c[k] = min(c[k], mx)
+        merged = {**cur["pairs"][pid], **c}
+        if merged["range_upper"] < merged["range_lower"]:
+            c["range_upper"] = merged["range_lower"]
+        pair_clean[pid] = c
+
+    state.apply_patch(g_clean, pair_clean)
+
+    # re-arm / reset market data where it matters
+    for pid, c in pair_clean.items():
+        old = cur["pairs"][pid]
+        with state.lock:
+            if (("symbol" in c and c["symbol"] != old["symbol"]) or
+                    ("timeframe" in c and c["timeframe"] != old["timeframe"])):
+                state.pair_state[pid]["last_checked_ts"] = None
+                state.market.pop(pid, None)
+            if c.get("enabled") and not old["enabled"]:
+                state.pair_state[pid]["last_checked_ts"] = None
+        if c:
+            state.add_log(f"[{pid}] settings updated: {c}")
+
+    # duplicate-symbol warning
+    new_cfg = state.get_config()
+    seen = {}
+    for pid in PAIR_IDS:
+        pc = new_cfg["pairs"][pid]
+        if pc["enabled"]:
+            seen.setdefault(pc["symbol"], []).append(pid)
+    for sym, pids in seen.items():
+        if len(pids) > 1:
+            warnings.append(f"Slots {', '.join(pids)} are all enabled on {sym}. BingX merges them into ONE real position — use different symbols.")
+
+    return jsonify({"ok": True, "warnings": warnings, "config": new_cfg})
 
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
     payload = request.get_json(force=True) or {}
     set_running(bool(payload.get("running")))
-    return jsonify({"running": state.running, "bot_stopped": state.bot_stopped})
-
-
-@app.route("/api/reset-kill-switch", methods=["POST"])
-def api_reset_kill_switch():
-    state.bot_stopped = False
-    state.add_log("♻️ Kill switch reset by user")
-    state._save()
-    return jsonify({"bot_stopped": state.bot_stopped})
+    return jsonify({"running": state.running})
 
 
 @app.route("/api/manual-order", methods=["POST"])
 def api_manual_order():
     payload = request.get_json(force=True) or {}
+    pid = payload.get("pair")
     side = (payload.get("side") or "").upper()
-    tf = payload.get("tf") or "5m"
-    if side not in ("LONG", "SHORT"):
-        return jsonify({"ok": False, "error": "invalid side"}), 400
-    if tf not in TF_KEYS:
-        return jsonify({"ok": False, "error": "invalid timeframe"}), 400
-    ok, msg = open_trade_manual(tf, side)
+    if pid not in PAIR_IDS or side not in ("LONG", "SHORT"):
+        return jsonify({"ok": False, "error": "invalid pair/side"}), 400
+    ok, msg = open_trade_manual(pid, side)
     return jsonify({"ok": ok, "message": msg})
 
 
 @app.route("/api/close-order", methods=["POST"])
 def api_close_order():
     payload = request.get_json(force=True) or {}
-    ticket_id = payload.get("ticket_id")
-    if not ticket_id:
-        return jsonify({"ok": False, "error": "missing ticket_id"}), 400
-    ok, msg = close_trade_manual(ticket_id)
+    pid = payload.get("pair")
+    if pid not in PAIR_IDS:
+        return jsonify({"ok": False, "error": "invalid pair"}), 400
+    ok, msg = close_trade_manual(pid)
     return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/reset-pair", methods=["POST"])
+def api_reset_pair():
+    payload = request.get_json(force=True) or {}
+    pid = payload.get("pair")
+    if pid not in PAIR_IDS:
+        return jsonify({"ok": False, "message": "invalid pair"}), 400
+    with state.lock:
+        if state.pair_state[pid]["in_position"]:
+            return jsonify({"ok": False, "message": "Close the open ticket first."})
+        cap = state.config["pairs"][pid]["initial_cap"]
+        state.pair_state[pid] = empty_pair_state(cap)
+        state._save()
+    state.add_log(f"[{pid}] stats / equity reset to {cap} USDT")
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
